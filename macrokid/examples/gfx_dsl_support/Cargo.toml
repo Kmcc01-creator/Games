@@ -4,4 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-
+render_resources_support = { path = "../render_resources_support" }
+gfx_dsl_builder_derive = { path = "../gfx_dsl_builder_derive" }

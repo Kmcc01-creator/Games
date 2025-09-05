@@ -6,6 +6,20 @@ use syn::{
     parse::{Parse, ParseStream},
     parse_macro_input, Ident, LitBool, LitInt, LitStr, Result, Token,
 };
+use macrokid_core::diag::{err_on, err_at_span};
+
+mod kw {
+    syn::custom_keyword!(app);
+    syn::custom_keyword!(window);
+    syn::custom_keyword!(graph);
+    syn::custom_keyword!(pass);
+    syn::custom_keyword!(pipelines);
+    syn::custom_keyword!(pipeline);
+    syn::custom_keyword!(vs);
+    syn::custom_keyword!(fs);
+    syn::custom_keyword!(topology);
+    syn::custom_keyword!(depth);
+}
 
 // Minimal Vulkan-first graphics DSL as a token-based macro.
 // Goal: generate boilerplate-light engine scaffolding and a backend trait impl.
@@ -54,19 +68,15 @@ impl Parse for EngineCfgAst {
         let mut graph = None;
 
         while !content.is_empty() {
-            let key: Ident = content.parse()?;
-            content.parse::<Token![:]>()?;
-            match key.to_string().as_str() {
-                "app" => {
-                    app = Some(content.parse()?);
-                }
-                "window" => {
-                    window = Some(content.parse()?);
-                }
-                "graph" => {
-                    graph = Some(content.parse()?);
-                }
-                _ => return Err(syn::Error::new_spanned(key, "unknown key in engine config")),
+            if content.peek(kw::app) {
+                content.parse::<kw::app>()?; content.parse::<Token![:]>()?; app = Some(content.parse()?);
+            } else if content.peek(kw::window) {
+                content.parse::<kw::window>()?; content.parse::<Token![:]>()?; window = Some(content.parse()?);
+            } else if content.peek(kw::graph) {
+                content.parse::<kw::graph>()?; content.parse::<Token![:]>()?; graph = Some(content.parse()?);
+            } else {
+                let look: Ident = content.parse()?;
+                return Err(err_on(&look, "expected one of: app, window, graph"));
             }
             let _ = content.parse::<Token![,]>();
         }
@@ -83,13 +93,15 @@ impl Parse for WindowCfgAst {
         let mut height = None;
         let mut vsync = None;
         while !content.is_empty() {
-            let key: Ident = content.parse()?;
-            content.parse::<Token![:]>()?;
-            match key.to_string().as_str() {
-                "width" => width = Some(content.parse()?),
-                "height" => height = Some(content.parse()?),
-                "vsync" => vsync = Some(content.parse()?),
-                _ => return Err(syn::Error::new_spanned(key, "unknown key in window config")),
+            if content.peek(syn::Ident) {
+                let key: Ident = content.parse()?;
+                content.parse::<Token![:]>()?;
+                match key.to_string().as_str() {
+                    "width" => width = Some(content.parse()?),
+                    "height" => height = Some(content.parse()?),
+                    "vsync" => vsync = Some(content.parse()?),
+                    _ => return Err(err_on(&key, "unknown key in window config; expected width/height/vsync")),
+                }
             }
             let _ = content.parse::<Token![,]>();
         }
@@ -103,42 +115,30 @@ impl Parse for GraphCfgAst {
         braced!(content in input);
         let mut passes = Vec::new();
         while !content.is_empty() {
-            let keyword: Ident = content.parse()?;
-            if keyword != "pass" {
-                return Err(syn::Error::new_spanned(keyword, "expected `pass`"));
-            }
+            content.parse::<kw::pass>()?;
             let name: Ident = content.parse()?;
             let pass: PassCfgAst = {
                 let inner;
                 braced!(inner in content);
                 let mut pipelines = Vec::new();
                 while !inner.is_empty() {
-                    let key: Ident = inner.parse()?;
-                    inner.parse::<Token![:]>()?;
-                    match key.to_string().as_str() {
-                        "pipelines" => {
+                    if inner.peek(kw::pipelines) {
+                        inner.parse::<kw::pipelines>()?; inner.parse::<Token![:]>()?;
                             let bracketed;
                             syn::bracketed!(bracketed in inner);
                             while !bracketed.is_empty() {
-                                let kw: Ident = bracketed.parse()?;
-                                if kw != "pipeline" {
-                                    return Err(syn::Error::new_spanned(kw, "expected `pipeline`"));
-                                }
+                                bracketed.parse::<kw::pipeline>()?;
                                 let pname: Ident = bracketed.parse()?;
                                 let p:
                                     PipelineCfgAst = {
                                         let pcontent; braced!(pcontent in bracketed);
                                         let mut vs = None; let mut fs = None; let mut topology = None; let mut depth = None;
                                         while !pcontent.is_empty() {
-                                            let k: Ident = pcontent.parse()?;
-                                            pcontent.parse::<Token![:]>()?;
-                                            match k.to_string().as_str() {
-                                                "vs" => vs = Some(pcontent.parse()?),
-                                                "fs" => fs = Some(pcontent.parse()?),
-                                                "topology" => topology = Some(pcontent.parse()?),
-                                                "depth" => depth = Some(pcontent.parse()?),
-                                                _ => return Err(syn::Error::new_spanned(k, "unknown pipeline key")),
-                                            }
+                                            if pcontent.peek(kw::vs) { pcontent.parse::<kw::vs>()?; pcontent.parse::<Token![:]>()?; vs = Some(pcontent.parse()?); }
+                                            else if pcontent.peek(kw::fs) { pcontent.parse::<kw::fs>()?; pcontent.parse::<Token![:]>()?; fs = Some(pcontent.parse()?); }
+                                            else if pcontent.peek(kw::topology) { pcontent.parse::<kw::topology>()?; pcontent.parse::<Token![:]>()?; topology = Some(pcontent.parse()?); }
+                                            else if pcontent.peek(kw::depth) { pcontent.parse::<kw::depth>()?; pcontent.parse::<Token![:]>()?; depth = Some(pcontent.parse()?); }
+                                            else { let u: Ident = pcontent.parse()?; return Err(err_on(&u, "unknown pipeline key; expected vs/fs/topology/depth")); }
                                             let _ = pcontent.parse::<Token![,]>();
                                         }
                                         PipelineCfgAst { name: pname, vs, fs, topology, depth }
@@ -146,8 +146,9 @@ impl Parse for GraphCfgAst {
                                 pipelines.push(p);
                                 let _ = bracketed.parse::<Token![,]>();
                             }
-                        }
-                        _ => return Err(syn::Error::new_spanned(key, "unknown key in pass")),
+                    } else {
+                        let unk: Ident = inner.parse()?;
+                        return Err(err_on(&unk, "unknown key in pass; expected `pipelines`"));
                     }
                     let _ = inner.parse::<Token![,]>();
                 }
@@ -243,4 +244,49 @@ pub fn vk_engine(input: TokenStream) -> TokenStream {
         #cfg_mod
     };
     out.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_ok(tokens: &str) -> bool {
+        syn::parse_str::<EngineCfgAst>(tokens).is_ok()
+    }
+    fn parse_err_contains(tokens: &str, needle: &str) -> bool {
+        match syn::parse_str::<EngineCfgAst>(tokens) {
+            Ok(_) => false,
+            Err(e) => format!("{}", e).contains(needle),
+        }
+    }
+
+    #[test]
+    fn parse_engine_ok() {
+        let t = "{ app: \"A\", window: { width: 1, height: 2, vsync: true }, graph: { pass main { pipelines: [ pipeline p { vs: \"a\", fs: \"b\" } ] } } }";
+        assert!(parse_ok(t));
+    }
+
+    #[test]
+    fn parse_engine_unknown_top_key() {
+        let t = "{ appl: \"A\" }";
+        assert!(parse_err_contains(t, "expected one of: app, window, graph"));
+    }
+
+    #[test]
+    fn parse_window_bad_key() {
+        let t = "{ app: \"A\", window: { width: 1, foo: 2 }, graph: { } }";
+        assert!(parse_err_contains(t, "unknown key in window config"));
+    }
+
+    #[test]
+    fn parse_pass_requires_pipelines() {
+        let t = "{ app: \"A\", window: { width: 1, height: 2, vsync: true }, graph: { pass main { wrong: 1 } } }";
+        assert!(parse_err_contains(t, "expected `pipelines`"));
+    }
+
+    #[test]
+    fn parse_pipeline_unknown_key() {
+        let t = "{ app: \"A\", window: { width: 1, height: 2, vsync: true }, graph: { pass main { pipelines: [ pipeline p { unknown: 1 } ] } } }";
+        assert!(parse_err_contains(t, "unknown pipeline key"));
+    }
 }

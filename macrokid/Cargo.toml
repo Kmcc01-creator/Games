@@ -10,4 +10,6 @@ members = [
     "examples/perl_regex_runtime",
     "examples/gfx_dsl",
     "examples/gfx_dsl_support",
+    "examples/gfx_dsl_builder_derive",
+    "examples/render_resources",
 ]

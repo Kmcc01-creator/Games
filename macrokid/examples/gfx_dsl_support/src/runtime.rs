@@ -1,4 +1,5 @@
 use crate::ir::{EngineConfig, PipelineDesc};
+use render_resources_support::{ResourceBindings, VertexLayout};
 
 pub trait RenderBackend {
     fn name() -> &'static str;
@@ -24,6 +25,20 @@ impl<B: RenderBackend> Engine<B> {
     pub fn init_pipelines(&self, cfg: &EngineConfig) {
         for p in cfg.pipelines.iter() { B::create_pipeline(p); }
     }
+    pub fn validate_pipelines_with<RB: ResourceBindings, VL: VertexLayout>(&self, cfg: &EngineConfig) -> Result<(), EngineValidateError> {
+        let rb = RB::bindings();
+        let vl = VL::vertex_attrs();
+        let vb = VL::vertex_buffer();
+        if rb.is_empty() { return Err(EngineValidateError::NoBindings); }
+        if vl.is_empty() { return Err(EngineValidateError::NoVertexAttrs); }
+        for p in cfg.pipelines.iter() {
+            println!("validate '{}' in pass '{}': bindings={} attrs={} stride={} step={:?} shaders=({}, {})",
+                p.name, p.pass, rb.len(), vl.len(), vb.stride, vb.step, p.shaders.vs, p.shaders.fs);
+        }
+        Ok(())
+    }
     pub fn frame(&self) { B::present(); }
 }
 
+#[derive(Debug)]
+pub enum EngineValidateError { NoBindings, NoVertexAttrs }

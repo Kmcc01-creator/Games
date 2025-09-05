@@ -1,5 +1,5 @@
 [package]
-name = "gfx_dsl"
+name = "render_resources"
 version = "0.1.0"
 edition = "2021"
 
@@ -11,6 +11,4 @@ proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full", "extra-traits"] }
 macrokid_core = { path = "../../macrokid_core" }
-gfx_dsl_support = { path = "../gfx_dsl_support" }
-render_resources = { path = "../render_resources" }
 render_resources_support = { path = "../render_resources_support" }
