@@ -48,6 +48,9 @@ enum Command {
         height: u32,
         #[arg(long, default_value = "toon.png")]
         out: String,
+        /// Optional Asset DNA YAML to drive toon LUT
+        #[arg(long)]
+        dna: Option<String>,
     },
     /// Render UV-sphere mesh into G-buffer and save albedo/normal
     #[cfg(feature = "vulkan")]
@@ -68,6 +71,12 @@ enum Command {
         height: u32,
         #[arg(long, default_value = "toon-mesh.png")]
         out: String,
+        /// Optional Asset DNA YAML to drive toon LUT
+        #[arg(long)]
+        dna: Option<String>,
+        /// Optional outline width in pixels (screen-space)
+        #[arg(long)]
+        outline_width: Option<f32>,
     },
 }
 
@@ -83,6 +92,21 @@ fn main() -> Result<()> {
             println!("  clothes: {} (folds={})", dna.clothes.top, dna.clothes.skirt_folds);
             println!("  shading bands: {}", dna.shading.bands);
             println!("  shadow thresholds: face={:.2}, cloth={:.2}", dna.shading.face_shadow_threshold, dna.shading.cloth_shadow_threshold);
+            println!(
+                "  hue/sat: shadow={:+.1}° x{:.2}, light={:+.1}° x{:.2}",
+                dna.shading.hue_shift_shadow_deg,
+                dna.shading.sat_scale_shadow,
+                dna.shading.hue_shift_light_deg,
+                dna.shading.sat_scale_light,
+            );
+            println!(
+                "  rim: strength={:.2}, width={:.2}; spec: thr={:.2}, int={:.2}; softness={:.2}",
+                dna.shading.rim_strength,
+                dna.shading.rim_width,
+                dna.shading.spec_threshold,
+                dna.shading.spec_intensity,
+                dna.shading.band_softness,
+            );
             println!("  line width: {:.2}px, crease angle: {:.0}°", dna.lines.width_px, dna.lines.crease_angle_deg);
         }
         #[cfg(feature = "vulkan")]
@@ -130,10 +154,16 @@ fn main() -> Result<()> {
             println!("Wrote {} and {}", ap, np);
         }
         #[cfg(feature = "vulkan")]
-        Command::VkToonFromGbuf { width, height, out } => {
+        Command::VkToonFromGbuf { width, height, out, dna } => {
             use stylize_core::render::vk;
             let ctx = vk::VkContext::new("stylize-toon-from-gbuf")?;
-            let pixels = vk::render_toon_from_gbuffer(&ctx, width, height)?;
+            let style = if let Some(path) = dna {
+                let dna = asset_dna::load_from_path(&path)?;
+                vk::toon_style_from_dna(&dna.shading)
+            } else {
+                vk::ToonStyle::default()
+            };
+            let pixels = vk::render_toon_from_gbuffer(&ctx, width, height, &style)?;
             let img = image::RgbaImage::from_raw(width, height, pixels)
                 .ok_or_else(|| anyhow::anyhow!("Failed to create image from raw"))?;
             img.save(&out)?;
@@ -155,10 +185,16 @@ fn main() -> Result<()> {
             println!("Wrote {} and {}", ap, np);
         }
         #[cfg(feature = "vulkan")]
-        Command::VkToonMesh { width, height, out } => {
+        Command::VkToonMesh { width, height, out, dna, outline_width } => {
             use stylize_core::render::vk;
             let ctx = vk::VkContext::new("stylize-toon-mesh")?;
-            let pixels = vk::render_toon_from_mesh(&ctx, width, height)?;
+            let (style, ow_px) = if let Some(path) = dna {
+                let dna = asset_dna::load_from_path(&path)?;
+                (vk::toon_style_from_dna(&dna.shading), outline_width.or(Some(dna.lines.width_px)))
+            } else {
+                (vk::ToonStyle::default(), outline_width)
+            };
+            let pixels = vk::render_toon_from_mesh(&ctx, width, height, &style, ow_px)?;
             let img = image::RgbaImage::from_raw(width, height, pixels)
                 .ok_or_else(|| anyhow::anyhow!("Failed to create image from raw"))?;
             img.save(&out)?;

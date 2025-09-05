@@ -3,6 +3,7 @@
 layout(location=0) in vec3 vNormal;
 layout(location=0) out vec4 oAlbedo;
 layout(location=1) out vec4 oNormal;
+layout(location=2) out uint oMaterial; // R8_UINT
 
 void main() {
     vec3 n = normalize(vNormal);
@@ -10,5 +11,6 @@ void main() {
     vec3 base = vec3(0.65, 0.30, 0.85);
     oAlbedo = vec4(base, 1.0);
     oNormal = vec4(n * 0.5 + 0.5, 1.0);
+    // Simple: treat as cloth (2)
+    oMaterial = uint(2);
 }
-

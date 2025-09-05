@@ -5,6 +5,7 @@ layout(location=0) in vec2 vUv;
 // Multiple render targets: 0 = albedo/region, 1 = normal (packed 0..1)
 layout(location=0) out vec4 oAlbedo;
 layout(location=1) out vec4 oNormal;
+layout(location=2) out uint oMaterial; // R8_UINT
 
 // Synthetic G-buffer content for demo:
 // - Albedo: soft checkerboard + gradient
@@ -29,4 +30,7 @@ void main() {
     vec3 n = normalize(vec3(cuv.x, cuv.y, 0.35));
     // Pack into 0..1
     oNormal = vec4(n * 0.5 + 0.5, 1.0);
+
+    // Material ID: alternate by checkerboard (0=skin, 2=cloth)
+    oMaterial = checker < 0.5 ? uint(0) : uint(2);
 }

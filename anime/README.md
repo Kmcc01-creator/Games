@@ -40,6 +40,7 @@ Note: Building will fetch crates from crates.io. If your environment blocks netw
 
 - G-buffer pass: Vulkan dynamic rendering for albedo/normal/depth (in progress).
 - Toon pass: region-aware thresholds (LUT) and push constants (partial: procedural + sampled G-buffer).
+  - Now includes soft band edges, optional hue/saturation shifts per band, crisp specular highlight, and rim parameters via push constants.
 - Outline pass: mesh backface expansion + crease edges (stubs in `assets/shaders/outline.vert`).
 - Temporal stability: motion-vector reprojection of edges/bands (planned).
 - Secondary motion: twin-tail hair chains via verlet using DNA parameters (planned).

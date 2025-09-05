@@ -86,6 +86,50 @@ impl Drop for VkContext {
     }
 }
 
+#[repr(C)]
+pub struct ToonStyle {
+    pub row0: [[f32; 4]; 8], // shadow, mid, rimStrength, rimWidth
+    pub row1: [[f32; 4]; 8], // softness, hueShad, hueLit, satShad
+    pub row2: [[f32; 4]; 8], // satLit, specThr, specInt, pad
+}
+
+impl Default for ToonStyle {
+    fn default() -> Self {
+        let mut s = Self {
+            row0: [[0.60, -1.0, 0.20, 0.35]; 8],
+            row1: [[0.05, -6.0, 6.0, 0.95]; 8],
+            row2: [[1.05, 0.86, 0.22, 0.0]; 8],
+        };
+        // Slight difference for skin (id 0)
+        s.row0[0][0] = 0.63; // face threshold
+        s
+    }
+}
+
+pub fn toon_style_from_dna(d: &crate::asset_dna::schema::Shading) -> ToonStyle {
+    let mut s = ToonStyle::default();
+    // IDs: 0=skin, 1=hair, 2=cloth (others copy cloth)
+    s.row0[0][0] = d.face_shadow_threshold;
+    s.row0[1][0] = d.cloth_shadow_threshold; // hair uses cloth for now
+    s.row0[2][0] = d.cloth_shadow_threshold;
+    for id in 0..8 {
+        s.row0[id][1] = if d.bands >= 3 { 0.75 } else { -1.0 }; // mid band threshold heuristic
+        s.row0[id][2] = d.rim_strength;
+        s.row0[id][3] = d.rim_width;
+
+        s.row1[id][0] = d.band_softness;
+        s.row1[id][1] = d.hue_shift_shadow_deg;
+        s.row1[id][2] = d.hue_shift_light_deg;
+        s.row1[id][3] = d.sat_scale_shadow;
+
+        s.row2[id][0] = d.sat_scale_light;
+        s.row2[id][1] = d.spec_threshold;
+        s.row2[id][2] = d.spec_intensity;
+        s.row2[id][3] = 0.0;
+    }
+    s
+}
+
 pub fn enumerate_devices() -> Result<Vec<String>> {
     let entry = unsafe { ash::Entry::load()? };
     let app_name_c = CString::new("stylize-enum").unwrap();
@@ -151,6 +195,7 @@ impl NprPipeline {
 pub const TOON_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/toon.frag.spv"));
 pub const TOON_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/toon.vert.spv"));
 pub const OUTLINE_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/outline.vert.spv"));
+pub const OUTLINE_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/outline.frag.spv"));
 pub const GBUFFER_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gbuffer.vert.spv"));
 pub const GBUFFER_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gbuffer.frag.spv"));
 pub const FSQ_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fsq.vert.spv"));
@@ -245,11 +290,11 @@ pub fn render_offscreen_rgba(ctx: &VkContext, width: u32, height: u32) -> Result
         vk::PipelineShaderStageCreateInfo::builder().stage(vk::ShaderStageFlags::FRAGMENT).module(frag).name(std::ffi::CStr::from_bytes_with_nul(b"main\0").unwrap()).build(),
     ];
 
-    // Push constants for toon params (4 floats = 16 bytes)
+    // Push constants for toon params (12 floats = 48 bytes)
     let pc_range = vk::PushConstantRange::builder()
         .stage_flags(vk::ShaderStageFlags::FRAGMENT)
         .offset(0)
-        .size(16)
+        .size(48)
         .build();
     let layout = vk::PipelineLayoutCreateInfo::builder().push_constant_ranges(std::slice::from_ref(&pc_range));
     let pipeline_layout = unsafe { ctx.device.create_pipeline_layout(&layout, None)? };
@@ -341,8 +386,21 @@ pub fn render_offscreen_rgba(ctx: &VkContext, width: u32, height: u32) -> Result
         // Bind pipeline and push toon params
         ctx.device.cmd_bind_pipeline(cmd_buf, vk::PipelineBindPoint::GRAPHICS, pipeline);
         #[repr(C)]
-        struct ToonPC { a: f32, b: f32, c: f32, d: f32 }
-        let pc = ToonPC { a: 0.55, b: -1.0, c: 0.25, d: 0.35 }; // shadow, mid(disable), rimStrength, rimWidth
+        struct ToonPC { data: [f32; 12] }
+        let pc = ToonPC { data: [
+            0.60,   // shadowThreshold
+            -1.0,   // midThreshold (disabled)
+            0.25,   // rimStrength
+            0.35,   // rimWidth
+            0.05,   // bandSoftness
+            0.0,    // hueShiftShadowDeg
+            0.0,    // hueShiftLightDeg
+            1.00,   // satScaleShadow
+            1.00,   // satScaleLight
+            0.86,   // specThreshold
+            0.25,   // specIntensity
+            0.0,    // _pad
+        ]};
         let bytes = std::slice::from_raw_parts((&pc as *const ToonPC) as *const u8, std::mem::size_of::<ToonPC>());
         ctx.device.cmd_push_constants(
             cmd_buf,
@@ -474,10 +532,12 @@ pub fn render_gbuffer_offscreen(ctx: &VkContext, width: u32, height: u32) -> Res
 
     let albedo_format = vk::Format::R8G8B8A8_UNORM;
     let normal_format = vk::Format::R8G8B8A8_UNORM;
+    let material_format = vk::Format::R8_UINT;
     let depth_format = vk::Format::D32_SFLOAT;
 
     let albedo = create_image_2d(ctx, width, height, albedo_format, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC, vk::ImageAspectFlags::COLOR)?;
     let normal = create_image_2d(ctx, width, height, normal_format, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC, vk::ImageAspectFlags::COLOR)?;
+    let material = create_image_2d(ctx, width, height, material_format, vk::ImageUsageFlags::COLOR_ATTACHMENT, vk::ImageAspectFlags::COLOR)?;
     let depth = create_image_2d(ctx, width, height, depth_format, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, vk::ImageAspectFlags::DEPTH)?;
     let gb = GBufferImages { albedo, normal, depth };
 
@@ -499,13 +559,14 @@ pub fn render_gbuffer_offscreen(ctx: &VkContext, width: u32, height: u32) -> Res
     let cba = [
         vk::PipelineColorBlendAttachmentState::builder().color_write_mask(cb_mask).blend_enable(false).build(),
         vk::PipelineColorBlendAttachmentState::builder().color_write_mask(cb_mask).blend_enable(false).build(),
+        vk::PipelineColorBlendAttachmentState::builder().color_write_mask(cb_mask).blend_enable(false).build(),
     ];
     let cb = vk::PipelineColorBlendStateCreateInfo::builder().attachments(&cba);
     let ds = vk::PipelineDepthStencilStateCreateInfo::builder().depth_test_enable(true).depth_write_enable(true).depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
     let dyn_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
     let dyn_state = vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dyn_states);
 
-    let color_formats = [albedo_format, normal_format];
+    let color_formats = [albedo_format, normal_format, material_format];
     let mut rendering_info = vk::PipelineRenderingCreateInfo::builder()
         .color_attachment_formats(&color_formats)
         .depth_attachment_format(depth_format);
@@ -550,7 +611,7 @@ pub fn render_gbuffer_offscreen(ctx: &VkContext, width: u32, height: u32) -> Res
         .image(image)
         .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::DEPTH, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 })
         .build();
-    let barriers = [to_color(gb.albedo.0), to_color(gb.normal.0), to_depth(gb.depth.0)];
+    let barriers = [to_color(gb.albedo.0), to_color(gb.normal.0), to_color(material.0), to_depth(gb.depth.0)];
     unsafe {
         ctx.device.cmd_pipeline_barrier(
             cmd_buf,
@@ -563,13 +624,15 @@ pub fn render_gbuffer_offscreen(ctx: &VkContext, width: u32, height: u32) -> Res
         );
     }
 
-    // Begin rendering with two color attachments and one depth
+    // Begin rendering with three color attachments and one depth
     let clear_albedo = vk::ClearValue { color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] } };
     let clear_normal = vk::ClearValue { color: vk::ClearColorValue { float32: [0.5, 0.5, 1.0, 1.0] } };
     let clear_depth = vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } };
     let att0 = vk::RenderingAttachmentInfo::builder().image_view(gb.albedo.2).image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).load_op(vk::AttachmentLoadOp::CLEAR).store_op(vk::AttachmentStoreOp::STORE).clear_value(clear_albedo).build();
     let att1 = vk::RenderingAttachmentInfo::builder().image_view(gb.normal.2).image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).load_op(vk::AttachmentLoadOp::CLEAR).store_op(vk::AttachmentStoreOp::STORE).clear_value(clear_normal).build();
-    let color_atts = [att0, att1];
+    let clear_mat = vk::ClearValue { color: vk::ClearColorValue { uint32: [0, 0, 0, 0] } };
+    let att2 = vk::RenderingAttachmentInfo::builder().image_view(material.2).image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).load_op(vk::AttachmentLoadOp::CLEAR).store_op(vk::AttachmentStoreOp::STORE).clear_value(clear_mat).build();
+    let color_atts = [att0, att1, att2];
     let depth_att = vk::RenderingAttachmentInfo::builder().image_view(gb.depth.2).image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL).load_op(vk::AttachmentLoadOp::CLEAR).store_op(vk::AttachmentStoreOp::DONT_CARE).clear_value(clear_depth);
     let render_info = vk::RenderingInfo::builder()
         .render_area(vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: vk::Extent2D { width, height } })
@@ -666,21 +729,26 @@ pub fn render_gbuffer_offscreen(ctx: &VkContext, width: u32, height: u32) -> Res
         ctx.device.destroy_buffer(buf_n, None);
         ctx.device.free_memory(mem_a, None);
         ctx.device.free_memory(mem_n, None);
+        ctx.device.destroy_image_view(material.2, None);
+        ctx.device.destroy_image(material.0, None);
+        ctx.device.free_memory(material.1, None);
     }
     gb.destroy(&ctx.device);
 
     Ok((albedo_pixels, normal_pixels))
 }
 
-pub fn render_toon_from_gbuffer(ctx: &VkContext, width: u32, height: u32) -> Result<Vec<u8>> {
+pub fn render_toon_from_gbuffer(ctx: &VkContext, width: u32, height: u32, style: &ToonStyle) -> Result<Vec<u8>> {
     use ash::vk as vk;
 
     // 1) Create G-buffer with SAMPLED usage
     let albedo_format = vk::Format::R8G8B8A8_UNORM;
     let normal_format = vk::Format::R8G8B8A8_UNORM;
+    let material_format = vk::Format::R8_UINT;
     let depth_format = vk::Format::D32_SFLOAT;
     let albedo = create_image_2d(ctx, width, height, albedo_format, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::SAMPLED, vk::ImageAspectFlags::COLOR)?;
     let normal = create_image_2d(ctx, width, height, normal_format, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::SAMPLED, vk::ImageAspectFlags::COLOR)?;
+    let material = create_image_2d(ctx, width, height, material_format, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED, vk::ImageAspectFlags::COLOR)?;
     let depth = create_image_2d(ctx, width, height, depth_format, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, vk::ImageAspectFlags::DEPTH)?;
     let gb = GBufferImages { albedo, normal, depth };
 
@@ -702,12 +770,13 @@ pub fn render_toon_from_gbuffer(ctx: &VkContext, width: u32, height: u32) -> Res
         let cba = [
             vk::PipelineColorBlendAttachmentState::builder().color_write_mask(cb_mask).blend_enable(false).build(),
             vk::PipelineColorBlendAttachmentState::builder().color_write_mask(cb_mask).blend_enable(false).build(),
+            vk::PipelineColorBlendAttachmentState::builder().color_write_mask(cb_mask).blend_enable(false).build(),
         ];
         let cb = vk::PipelineColorBlendStateCreateInfo::builder().attachments(&cba);
         let ds = vk::PipelineDepthStencilStateCreateInfo::builder().depth_test_enable(true).depth_write_enable(true).depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
         let dyn_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dyn_state = vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dyn_states);
-        let color_formats = [albedo_format, normal_format];
+        let color_formats = [albedo_format, normal_format, material_format];
         let mut rendering_info = vk::PipelineRenderingCreateInfo::builder()
             .color_attachment_formats(&color_formats)
             .depth_attachment_format(depth_format);
@@ -752,7 +821,7 @@ pub fn render_toon_from_gbuffer(ctx: &VkContext, width: u32, height: u32) -> Res
             .image(image)
             .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::DEPTH, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 })
             .build();
-        let barriers = [to_color(gb.albedo.0), to_color(gb.normal.0), to_depth(gb.depth.0)];
+        let barriers = [to_color(gb.albedo.0), to_color(gb.normal.0), to_color(material.0), to_depth(gb.depth.0)];
         unsafe {
             ctx.device.cmd_pipeline_barrier(
                 cmd_buf,
@@ -770,7 +839,9 @@ pub fn render_toon_from_gbuffer(ctx: &VkContext, width: u32, height: u32) -> Res
         let clear_depth = vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } };
         let att0 = vk::RenderingAttachmentInfo::builder().image_view(gb.albedo.2).image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).load_op(vk::AttachmentLoadOp::CLEAR).store_op(vk::AttachmentStoreOp::STORE).clear_value(clear_albedo).build();
         let att1 = vk::RenderingAttachmentInfo::builder().image_view(gb.normal.2).image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).load_op(vk::AttachmentLoadOp::CLEAR).store_op(vk::AttachmentStoreOp::STORE).clear_value(clear_normal).build();
-        let color_atts = [att0, att1];
+        let clear_mat = vk::ClearValue { color: vk::ClearColorValue { uint32: [0, 0, 0, 0] } };
+        let att2 = vk::RenderingAttachmentInfo::builder().image_view(material.2).image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).load_op(vk::AttachmentLoadOp::CLEAR).store_op(vk::AttachmentStoreOp::STORE).clear_value(clear_mat).build();
+        let color_atts = [att0, att1, att2];
         let depth_att = vk::RenderingAttachmentInfo::builder().image_view(gb.depth.2).image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL).load_op(vk::AttachmentLoadOp::CLEAR).store_op(vk::AttachmentStoreOp::DONT_CARE).clear_value(clear_depth);
         let render_info = vk::RenderingInfo::builder()
             .render_area(vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: vk::Extent2D { width, height } })
@@ -841,19 +912,24 @@ pub fn render_toon_from_gbuffer(ctx: &VkContext, width: u32, height: u32) -> Res
     let bindings = [
         vk::DescriptorSetLayoutBinding::builder().binding(0).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
         vk::DescriptorSetLayoutBinding::builder().binding(1).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
+        vk::DescriptorSetLayoutBinding::builder().binding(2).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
+        vk::DescriptorSetLayoutBinding::builder().binding(3).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::FRAGMENT).build(),
     ];
     let dsl_ci = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
     let dsl = unsafe { ctx.device.create_descriptor_set_layout(&dsl_ci, None)? };
     let pc_range = vk::PushConstantRange::builder()
         .stage_flags(vk::ShaderStageFlags::FRAGMENT)
         .offset(0)
-        .size(16)
+        .size(48)
         .build();
     let layout_ci = vk::PipelineLayoutCreateInfo::builder()
         .set_layouts(std::slice::from_ref(&dsl))
         .push_constant_ranges(std::slice::from_ref(&pc_range));
     let pipeline_layout = unsafe { ctx.device.create_pipeline_layout(&layout_ci, None)? };
-    let pool_sizes = [vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 2 }];
+    let pool_sizes = [
+        vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 3 },
+        vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 1 },
+    ];
     let dp_ci = vk::DescriptorPoolCreateInfo::builder().max_sets(1).pool_sizes(&pool_sizes);
     let dpool = unsafe { ctx.device.create_descriptor_pool(&dp_ci, None)? };
     let alloc_info = vk::DescriptorSetAllocateInfo::builder().descriptor_pool(dpool).set_layouts(std::slice::from_ref(&dsl));
@@ -969,9 +1045,21 @@ pub fn render_toon_from_gbuffer(ctx: &VkContext, width: u32, height: u32) -> Res
         ctx.device.cmd_bind_pipeline(cmd_buf, vk::PipelineBindPoint::GRAPHICS, pipeline);
         ctx.device.cmd_bind_descriptor_sets(cmd_buf, vk::PipelineBindPoint::GRAPHICS, pipeline_layout, 0, std::slice::from_ref(&dset), &[]);
         #[repr(C)]
-        struct ToonPC { a: f32, b: f32, c: f32, d: f32 }
-        // shadowThreshold=0.8 for clear two-band separation, rim off for clarity
-        let pc = ToonPC { a: 0.80, b: -1.0, c: 0.0, d: 0.35 };
+        struct ToonPC { data: [f32; 12] }
+        let pc = ToonPC { data: [
+            0.60,   // shadowThreshold
+            -1.0,   // midThreshold (disabled)
+            0.20,   // rimStrength
+            0.35,   // rimWidth
+            0.05,   // bandSoftness
+            -6.0,   // hueShiftShadowDeg (slightly cooler)
+            6.0,    // hueShiftLightDeg  (slightly warmer)
+            0.95,   // satScaleShadow
+            1.05,   // satScaleLight
+            0.86,   // specThreshold
+            0.22,   // specIntensity
+            0.0,    // _pad
+        ]};
         let bytes = std::slice::from_raw_parts((&pc as *const ToonPC) as *const u8, std::mem::size_of::<ToonPC>());
         ctx.device.cmd_push_constants(cmd_buf, pipeline_layout, vk::ShaderStageFlags::FRAGMENT, 0, bytes);
         ctx.device.cmd_draw(cmd_buf, 3, 1, 0, 0);
@@ -1046,7 +1134,7 @@ pub fn render_toon_from_gbuffer(ctx: &VkContext, width: u32, height: u32) -> Res
     Ok(pixels)
 }
 
-pub fn render_toon_from_mesh(ctx: &VkContext, width: u32, height: u32) -> Result<Vec<u8>> {
+pub fn render_toon_from_mesh(ctx: &VkContext, width: u32, height: u32, style: &ToonStyle, outline_width_px: Option<f32>) -> Result<Vec<u8>> {
     use ash::vk as vk;
     use crate::render::mesh::{generate_uv_sphere, Vertex};
 
@@ -1083,8 +1171,12 @@ pub fn render_toon_from_mesh(ctx: &VkContext, width: u32, height: u32) -> Result
     // Create G-buffer attachments with SAMPLED so we can use them in the toon pass
     let albedo_format = vk::Format::R8G8B8A8_UNORM;
     let normal_format = vk::Format::R8G8B8A8_UNORM;
+    let material_format = vk::Format::R8_UINT;
+    let depth_format = vk::Format::D32_SFLOAT;
     let albedo = create_image_2d(ctx, width, height, albedo_format, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::SAMPLED, vk::ImageAspectFlags::COLOR)?;
     let normal = create_image_2d(ctx, width, height, normal_format, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::SAMPLED, vk::ImageAspectFlags::COLOR)?;
+    let material = create_image_2d(ctx, width, height, material_format, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED, vk::ImageAspectFlags::COLOR)?;
+    let depth = create_image_2d(ctx, width, height, depth_format, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, vk::ImageAspectFlags::DEPTH)?;
 
     // Create mesh G-buffer pipeline
     let vmod = create_shader_module(&ctx.device, MESH_GBUFFER_VERT_SPV)?;
@@ -1107,13 +1199,14 @@ pub fn render_toon_from_mesh(ctx: &VkContext, width: u32, height: u32) -> Result
     let cba = [
         vk::PipelineColorBlendAttachmentState::builder().color_write_mask(cb_mask).blend_enable(false).build(),
         vk::PipelineColorBlendAttachmentState::builder().color_write_mask(cb_mask).blend_enable(false).build(),
+        vk::PipelineColorBlendAttachmentState::builder().color_write_mask(cb_mask).blend_enable(false).build(),
     ];
     let cb = vk::PipelineColorBlendStateCreateInfo::builder().attachments(&cba);
-    let ds = vk::PipelineDepthStencilStateCreateInfo::builder().depth_test_enable(false).depth_write_enable(false);
+    let ds = vk::PipelineDepthStencilStateCreateInfo::builder().depth_test_enable(true).depth_write_enable(true).depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
     let dyn_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
     let dyn_state = vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dyn_states);
-    let color_formats = [albedo_format, normal_format];
-    let mut rendering_info = vk::PipelineRenderingCreateInfo::builder().color_attachment_formats(&color_formats);
+    let color_formats = [albedo_format, normal_format, material_format];
+    let mut rendering_info = vk::PipelineRenderingCreateInfo::builder().color_attachment_formats(&color_formats).depth_attachment_format(depth_format);
     let layout_ci = vk::PipelineLayoutCreateInfo::builder();
     let pipeline_layout = unsafe { ctx.device.create_pipeline_layout(&layout_ci, None)? };
     let gp_ci = vk::GraphicsPipelineCreateInfo::builder()
@@ -1146,7 +1239,15 @@ pub fn render_toon_from_mesh(ctx: &VkContext, width: u32, height: u32) -> Result
         .image(image)
         .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 })
         .build();
-    let barriers = [to_color(albedo.0), to_color(normal.0)];
+    let to_depth = |image| vk::ImageMemoryBarrier::builder()
+        .src_access_mask(vk::AccessFlags::empty())
+        .dst_access_mask(vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+        .old_layout(vk::ImageLayout::UNDEFINED)
+        .new_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+        .image(image)
+        .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::DEPTH, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 })
+        .build();
+    let barriers = [to_color(albedo.0), to_color(normal.0), to_color(material.0), to_depth(depth.0)];
     unsafe {
         ctx.device.cmd_pipeline_barrier(
             cmd_buf,
@@ -1162,11 +1263,15 @@ pub fn render_toon_from_mesh(ctx: &VkContext, width: u32, height: u32) -> Result
     let clear1 = vk::ClearValue { color: vk::ClearColorValue { float32: [0.5, 0.5, 1.0, 1.0] } };
     let att0 = vk::RenderingAttachmentInfo::builder().image_view(albedo.2).image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).load_op(vk::AttachmentLoadOp::CLEAR).store_op(vk::AttachmentStoreOp::STORE).clear_value(clear0).build();
     let att1 = vk::RenderingAttachmentInfo::builder().image_view(normal.2).image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).load_op(vk::AttachmentLoadOp::CLEAR).store_op(vk::AttachmentStoreOp::STORE).clear_value(clear1).build();
-    let color_atts = [att0, att1];
+    let clear_mat = vk::ClearValue { color: vk::ClearColorValue { uint32: [2, 0, 0, 0] } };
+    let att2 = vk::RenderingAttachmentInfo::builder().image_view(material.2).image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).load_op(vk::AttachmentLoadOp::CLEAR).store_op(vk::AttachmentStoreOp::STORE).clear_value(clear_mat).build();
+    let color_atts = [att0, att1, att2];
+    let depth_att = vk::RenderingAttachmentInfo::builder().image_view(depth.2).image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL).load_op(vk::AttachmentLoadOp::CLEAR).store_op(vk::AttachmentStoreOp::STORE).clear_value(vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } });
     let render_info = vk::RenderingInfo::builder()
         .render_area(vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: vk::Extent2D { width, height } })
         .layer_count(1)
-        .color_attachments(&color_atts);
+        .color_attachments(&color_atts)
+        .depth_attachment(&depth_att);
     unsafe {
         ctx.device.cmd_begin_rendering(cmd_buf, &render_info);
         let viewport = vk::Viewport { x: 0.0, y: 0.0, width: width as f32, height: height as f32, min_depth: 0.0, max_depth: 1.0 };
@@ -1191,7 +1296,7 @@ pub fn render_toon_from_mesh(ctx: &VkContext, width: u32, height: u32) -> Result
         .image(image)
         .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 })
         .build();
-    let barriers2 = [to_read(albedo.0), to_read(normal.0)];
+    let barriers2 = [to_read(albedo.0), to_read(normal.0), to_read(material.0)];
     unsafe {
         ctx.device.cmd_pipeline_barrier(
             cmd_buf,
@@ -1222,7 +1327,7 @@ pub fn render_toon_from_mesh(ctx: &VkContext, width: u32, height: u32) -> Result
     ];
     let dsl_ci = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
     let dsl = unsafe { ctx.device.create_descriptor_set_layout(&dsl_ci, None)? };
-    let pc_range = vk::PushConstantRange::builder().stage_flags(vk::ShaderStageFlags::FRAGMENT).offset(0).size(16).build();
+    let pc_range = vk::PushConstantRange::builder().stage_flags(vk::ShaderStageFlags::FRAGMENT).offset(0).size(48).build();
     let layout_ci = vk::PipelineLayoutCreateInfo::builder().set_layouts(std::slice::from_ref(&dsl)).push_constant_ranges(std::slice::from_ref(&pc_range));
     let pipeline_layout = unsafe { ctx.device.create_pipeline_layout(&layout_ci, None)? };
     let pool_sizes = [vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 2 }];
@@ -1232,9 +1337,32 @@ pub fn render_toon_from_mesh(ctx: &VkContext, width: u32, height: u32) -> Result
     let dset = unsafe { ctx.device.allocate_descriptor_sets(&alloc_info)? }[0];
     let info_albedo = vk::DescriptorImageInfo::builder().sampler(sampler).image_view(albedo.2).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL).build();
     let info_normal = vk::DescriptorImageInfo::builder().sampler(sampler).image_view(normal.2).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL).build();
+    let info_material = vk::DescriptorImageInfo::builder().sampler(sampler).image_view(material.2).image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL).build();
+    // Create LUT UBO with default style (will be overridden by DNA path via CLI in mesh variant)
+    let style = style;
+    let lut_size = (8 * 3 * 16) as u64;
+    let lut_buf_ci = vk::BufferCreateInfo::builder().size(lut_size).usage(vk::BufferUsageFlags::UNIFORM_BUFFER).sharing_mode(vk::SharingMode::EXCLUSIVE);
+    let lut_buf = unsafe { ctx.device.create_buffer(&lut_buf_ci, None)? };
+    let lut_req = unsafe { ctx.device.get_buffer_memory_requirements(lut_buf) };
+    let lut_mt = find_memory_type(&ctx.instance, ctx.pdevice, lut_req.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT)?;
+    let lut_ai = vk::MemoryAllocateInfo::builder().allocation_size(lut_req.size).memory_type_index(lut_mt);
+    let lut_mem = unsafe { ctx.device.allocate_memory(&lut_ai, None)? };
+    unsafe { ctx.device.bind_buffer_memory(lut_buf, lut_mem, 0)? };
+    unsafe {
+        let ptr = ctx.device.map_memory(lut_mem, 0, lut_size, vk::MemoryMapFlags::empty())? as *mut f32;
+        let slice = std::slice::from_raw_parts_mut(ptr, (lut_size/4) as usize);
+        let mut idx = 0usize;
+        for i in 0..8 { for j in 0..4 { slice[idx] = style.row0[i][j]; idx+=1; } }
+        for i in 0..8 { for j in 0..4 { slice[idx] = style.row1[i][j]; idx+=1; } }
+        for i in 0..8 { for j in 0..4 { slice[idx] = style.row2[i][j]; idx+=1; } }
+        ctx.device.unmap_memory(lut_mem);
+    }
+    let lut_info = vk::DescriptorBufferInfo::builder().buffer(lut_buf).offset(0).range(lut_size).build();
     let writes = [
         vk::WriteDescriptorSet::builder().dst_set(dset).dst_binding(0).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(std::slice::from_ref(&info_albedo)).build(),
         vk::WriteDescriptorSet::builder().dst_set(dset).dst_binding(1).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(std::slice::from_ref(&info_normal)).build(),
+        vk::WriteDescriptorSet::builder().dst_set(dset).dst_binding(2).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(std::slice::from_ref(&info_material)).build(),
+        vk::WriteDescriptorSet::builder().dst_set(dset).dst_binding(3).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).buffer_info(std::slice::from_ref(&lut_info)).build(),
     ];
     unsafe { ctx.device.update_descriptor_sets(&writes, &[]) };
 
@@ -1311,12 +1439,94 @@ pub fn render_toon_from_mesh(ctx: &VkContext, width: u32, height: u32) -> Result
         ctx.device.cmd_bind_pipeline(cmd_buf2, vk::PipelineBindPoint::GRAPHICS, pipeline2);
         ctx.device.cmd_bind_descriptor_sets(cmd_buf2, vk::PipelineBindPoint::GRAPHICS, pipeline_layout, 0, std::slice::from_ref(&dset), &[]);
         #[repr(C)]
-        struct ToonPC { a: f32, b: f32, c: f32, d: f32 }
-        let pc = ToonPC { a: 0.80, b: -1.0, c: 0.0, d: 0.35 };
+        struct ToonPC { data: [f32; 12] }
+        let pc = ToonPC { data: [
+            0.60,   // shadowThreshold
+            -1.0,   // midThreshold (disabled)
+            0.20,   // rimStrength
+            0.35,   // rimWidth
+            0.05,   // bandSoftness
+            -6.0,   // hueShiftShadowDeg (slightly cooler)
+            6.0,    // hueShiftLightDeg  (slightly warmer)
+            0.95,   // satScaleShadow
+            1.05,   // satScaleLight
+            0.86,   // specThreshold
+            0.22,   // specIntensity
+            0.0,    // _pad
+        ]};
         let bytes = std::slice::from_raw_parts((&pc as *const ToonPC) as *const u8, std::mem::size_of::<ToonPC>());
         ctx.device.cmd_push_constants(cmd_buf2, pipeline_layout, vk::ShaderStageFlags::FRAGMENT, 0, bytes);
         ctx.device.cmd_draw(cmd_buf2, 3, 1, 0, 0);
         ctx.device.cmd_end_rendering(cmd_buf2);
+
+        // Outline composite pass: draw backface-expanded mesh over toon using depth
+        let ov = create_shader_module(&ctx.device, OUTLINE_VERT_SPV)?;
+        let of = create_shader_module(&ctx.device, OUTLINE_FRAG_SPV)?;
+        let stages_o = [
+            vk::PipelineShaderStageCreateInfo::builder().stage(vk::ShaderStageFlags::VERTEX).module(ov).name(std::ffi::CStr::from_bytes_with_nul(b"main\0").unwrap()).build(),
+            vk::PipelineShaderStageCreateInfo::builder().stage(vk::ShaderStageFlags::FRAGMENT).module(of).name(std::ffi::CStr::from_bytes_with_nul(b"main\0").unwrap()).build(),
+        ];
+        let binding_desc_o = vk::VertexInputBindingDescription::builder().binding(0).stride(std::mem::size_of::<crate::render::mesh::Vertex>() as u32).input_rate(vk::VertexInputRate::VERTEX).build();
+        let attr_descs_o = [
+            vk::VertexInputAttributeDescription::builder().location(0).binding(0).format(vk::Format::R32G32B32_SFLOAT).offset(0).build(),
+            vk::VertexInputAttributeDescription::builder().location(1).binding(0).format(vk::Format::R32G32B32_SFLOAT).offset(12).build(),
+        ];
+        let vi_o = vk::PipelineVertexInputStateCreateInfo::builder().vertex_binding_descriptions(std::slice::from_ref(&binding_desc_o)).vertex_attribute_descriptions(&attr_descs_o);
+        let ia_o = vk::PipelineInputAssemblyStateCreateInfo::builder().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+        let vp_o = vk::PipelineViewportStateCreateInfo::builder().viewport_count(1).scissor_count(1);
+        let rs_o = vk::PipelineRasterizationStateCreateInfo::builder().polygon_mode(vk::PolygonMode::FILL).cull_mode(vk::CullModeFlags::FRONT).front_face(vk::FrontFace::COUNTER_CLOCKWISE).line_width(1.0);
+        let ms_o = vk::PipelineMultisampleStateCreateInfo::builder().rasterization_samples(vk::SampleCountFlags::TYPE_1);
+        let cb_o = vk::PipelineColorBlendStateCreateInfo::builder().attachments(std::slice::from_ref(&cba2));
+        let ds_o = vk::PipelineDepthStencilStateCreateInfo::builder().depth_test_enable(true).depth_write_enable(false).depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
+        let dyn_states_o = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dyn_state_o = vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dyn_states_o);
+        let mut rendering_info_o = vk::PipelineRenderingCreateInfo::builder().color_attachment_formats(std::slice::from_ref(&out_format)).depth_attachment_format(vk::Format::D32_SFLOAT);
+        // Push constant: float outline width
+        let pc_range_o = vk::PushConstantRange::builder().stage_flags(vk::ShaderStageFlags::VERTEX).offset(0).size(4).build();
+        let layout_ci_o = vk::PipelineLayoutCreateInfo::builder().push_constant_ranges(std::slice::from_ref(&pc_range_o));
+        let pipeline_layout_o = ctx.device.create_pipeline_layout(&layout_ci_o, None)?;
+        let gp_ci_o = vk::GraphicsPipelineCreateInfo::builder()
+            .stages(&stages_o)
+            .vertex_input_state(&vi_o)
+            .input_assembly_state(&ia_o)
+            .viewport_state(&vp_o)
+            .rasterization_state(&rs_o)
+            .multisample_state(&ms_o)
+            .depth_stencil_state(&ds_o)
+            .color_blend_state(&cb_o)
+            .dynamic_state(&dyn_state_o)
+            .layout(pipeline_layout_o)
+            .push_next(&mut rendering_info_o);
+        let pipeline_o = ctx.device.create_graphics_pipelines(vk::PipelineCache::null(), std::slice::from_ref(&gp_ci_o), None)
+            .map_err(|e| anyhow!("pipeline creation failed: {:?}", e.1))?[0];
+
+        // Begin rendering over the toon target with depth
+        let att_o = vk::RenderingAttachmentInfo::builder().image_view(out_view).image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).load_op(vk::AttachmentLoadOp::LOAD).store_op(vk::AttachmentStoreOp::STORE);
+        let depth_att_o = vk::RenderingAttachmentInfo::builder().image_view(depth.2).image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL).load_op(vk::AttachmentLoadOp::LOAD).store_op(vk::AttachmentStoreOp::STORE);
+        let render_info_o = vk::RenderingInfo::builder().render_area(vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: vk::Extent2D { width, height } }).layer_count(1).color_attachments(std::slice::from_ref(&att_o)).depth_attachment(&depth_att_o);
+        ctx.device.cmd_begin_rendering(cmd_buf2, &render_info_o);
+        let viewport_o = vk::Viewport { x: 0.0, y: 0.0, width: width as f32, height: height as f32, min_depth: 0.0, max_depth: 1.0 };
+        let scissor_o = vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: vk::Extent2D { width, height } };
+        ctx.device.cmd_set_viewport(cmd_buf2, 0, std::slice::from_ref(&viewport_o));
+        ctx.device.cmd_set_scissor(cmd_buf2, 0, std::slice::from_ref(&scissor_o));
+        ctx.device.cmd_bind_pipeline(cmd_buf2, vk::PipelineBindPoint::GRAPHICS, pipeline_o);
+        let vb_buffers_o = [vb];
+        let vb_offsets_o = [0u64];
+        ctx.device.cmd_bind_vertex_buffers(cmd_buf2, 0, &vb_buffers_o, &vb_offsets_o);
+        ctx.device.cmd_bind_index_buffer(cmd_buf2, ib, 0, vk::IndexType::UINT32);
+        let width_pc: f32 = outline_width_px
+            .map(|px| px * (2.0 / width as f32))
+            .unwrap_or(2.0 * (2.0 / width as f32));
+        let pc_bytes = std::slice::from_raw_parts((&width_pc as *const f32) as *const u8, std::mem::size_of::<f32>());
+        ctx.device.cmd_push_constants(cmd_buf2, pipeline_layout_o, vk::ShaderStageFlags::VERTEX, 0, pc_bytes);
+        ctx.device.cmd_draw_indexed(cmd_buf2, inds.len() as u32, 1, 0, 0, 0);
+        ctx.device.cmd_end_rendering(cmd_buf2);
+
+        // Cleanup outline pipeline objects
+        ctx.device.destroy_pipeline(pipeline_o, None);
+        ctx.device.destroy_pipeline_layout(pipeline_layout_o, None);
+        ctx.device.destroy_shader_module(ov, None);
+        ctx.device.destroy_shader_module(of, None);
     }
 
     // Copy output to host
@@ -1364,6 +1574,9 @@ pub fn render_toon_from_mesh(ctx: &VkContext, width: u32, height: u32) -> Result
         ctx.device.destroy_command_pool(cmd_pool2, None);
         ctx.device.destroy_buffer(buffer, None);
         ctx.device.free_memory(buffer_mem, None);
+        // LUT buffer
+        ctx.device.destroy_buffer(lut_buf, None);
+        ctx.device.free_memory(lut_mem, None);
 
         ctx.device.destroy_image_view(out_view, None);
         ctx.device.destroy_image(out_img, None);
@@ -1375,6 +1588,9 @@ pub fn render_toon_from_mesh(ctx: &VkContext, width: u32, height: u32) -> Result
         ctx.device.destroy_image_view(normal.2, None);
         ctx.device.destroy_image(normal.0, None);
         ctx.device.free_memory(normal.1, None);
+        ctx.device.destroy_image_view(material.2, None);
+        ctx.device.destroy_image(material.0, None);
+        ctx.device.free_memory(material.1, None);
 
         ctx.device.destroy_buffer(vb, None);
         ctx.device.destroy_buffer(ib, None);
@@ -1423,8 +1639,10 @@ pub fn render_mesh_gbuffer_offscreen(ctx: &VkContext, width: u32, height: u32) -
     // Create G-buffer attachments (color only, disable depth for simplicity)
     let albedo_format = vk::Format::R8G8B8A8_UNORM;
     let normal_format = vk::Format::R8G8B8A8_UNORM;
+    let material_format = vk::Format::R8_UINT;
     let albedo = create_image_2d(ctx, width, height, albedo_format, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC, vk::ImageAspectFlags::COLOR)?;
     let normal = create_image_2d(ctx, width, height, normal_format, vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC, vk::ImageAspectFlags::COLOR)?;
+    let material = create_image_2d(ctx, width, height, material_format, vk::ImageUsageFlags::COLOR_ATTACHMENT, vk::ImageAspectFlags::COLOR)?;
 
     // Pipeline for mesh G-buffer
     let vmod = create_shader_module(&ctx.device, MESH_GBUFFER_VERT_SPV)?;
@@ -1448,12 +1666,13 @@ pub fn render_mesh_gbuffer_offscreen(ctx: &VkContext, width: u32, height: u32) -
     let cba = [
         vk::PipelineColorBlendAttachmentState::builder().color_write_mask(cb_mask).blend_enable(false).build(),
         vk::PipelineColorBlendAttachmentState::builder().color_write_mask(cb_mask).blend_enable(false).build(),
+        vk::PipelineColorBlendAttachmentState::builder().color_write_mask(cb_mask).blend_enable(false).build(),
     ];
     let cb = vk::PipelineColorBlendStateCreateInfo::builder().attachments(&cba);
     let ds = vk::PipelineDepthStencilStateCreateInfo::builder().depth_test_enable(false).depth_write_enable(false);
     let dyn_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
     let dyn_state = vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dyn_states);
-    let color_formats = [albedo_format, normal_format];
+    let color_formats = [albedo_format, normal_format, material_format];
     let mut rendering_info = vk::PipelineRenderingCreateInfo::builder().color_attachment_formats(&color_formats);
     let layout_ci = vk::PipelineLayoutCreateInfo::builder();
     let pipeline_layout = unsafe { ctx.device.create_pipeline_layout(&layout_ci, None)? };
@@ -1489,7 +1708,7 @@ pub fn render_mesh_gbuffer_offscreen(ctx: &VkContext, width: u32, height: u32) -
         .image(image)
         .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 })
         .build();
-    let barriers = [to_color(albedo.0), to_color(normal.0)];
+    let barriers = [to_color(albedo.0), to_color(normal.0), to_color(material.0)];
     unsafe {
         ctx.device.cmd_pipeline_barrier(
             cmd_buf,
@@ -1507,7 +1726,9 @@ pub fn render_mesh_gbuffer_offscreen(ctx: &VkContext, width: u32, height: u32) -
     let clear1 = vk::ClearValue { color: vk::ClearColorValue { float32: [0.5, 0.5, 1.0, 1.0] } };
     let att0 = vk::RenderingAttachmentInfo::builder().image_view(albedo.2).image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).load_op(vk::AttachmentLoadOp::CLEAR).store_op(vk::AttachmentStoreOp::STORE).clear_value(clear0).build();
     let att1 = vk::RenderingAttachmentInfo::builder().image_view(normal.2).image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).load_op(vk::AttachmentLoadOp::CLEAR).store_op(vk::AttachmentStoreOp::STORE).clear_value(clear1).build();
-    let color_atts = [att0, att1];
+    let clear_mat = vk::ClearValue { color: vk::ClearColorValue { uint32: [2, 0, 0, 0] } };
+    let att2 = vk::RenderingAttachmentInfo::builder().image_view(material.2).image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL).load_op(vk::AttachmentLoadOp::CLEAR).store_op(vk::AttachmentStoreOp::STORE).clear_value(clear_mat).build();
+    let color_atts = [att0, att1, att2];
     let render_info = vk::RenderingInfo::builder()
         .render_area(vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: vk::Extent2D { width, height } })
         .layer_count(1)
@@ -1599,6 +1820,9 @@ pub fn render_mesh_gbuffer_offscreen(ctx: &VkContext, width: u32, height: u32) -
         ctx.device.destroy_buffer(buf_n, None);
         ctx.device.free_memory(mem_a, None);
         ctx.device.free_memory(mem_n, None);
+        ctx.device.destroy_image_view(material.2, None);
+        ctx.device.destroy_image(material.0, None);
+        ctx.device.free_memory(material.1, None);
         ctx.device.destroy_image_view(albedo.2, None);
         ctx.device.destroy_image(albedo.0, None);
         ctx.device.free_memory(albedo.1, None);

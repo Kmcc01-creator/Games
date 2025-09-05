@@ -93,8 +93,7 @@ Deliverables
 - [ ] Region/material ID buffer + LUT in toon pass.
 - [ ] Outline pass (mesh backface expansion) + composite.
 - [ ] UV-sphere sprite export demo (turntable) + JSON metadata.
-- [ ] DNA-driven color palettes and shading thresholds.
+- [x] DNA-driven shading style knobs (hue/sat, rim, spec, softness).
 - [ ] Verlet hair chains from DNA; bake into sprite sequences.
 - [ ] Face SDF mask for stylized face shadows.
 - [ ] CLI UX polish + docs.
-
