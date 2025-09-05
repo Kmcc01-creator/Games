@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = [
+    "macrokid",
+    "macrokid_core", 
+    "example",
+    "examples/custom_derive",
+    "examples/custom_derive_support",
+    "examples/perl_regex_poc",
+    "examples/perl_regex_runtime",
+    "examples/gfx_dsl",
+    "examples/gfx_dsl_support",
+]

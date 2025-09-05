@@ -1,0 +1,9 @@
+[package]
+name = "example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+macrokid = { path = "../macrokid" }
+custom_derive = { path = "../examples/custom_derive" }
+custom_derive_support = { path = "../examples/custom_derive_support" }

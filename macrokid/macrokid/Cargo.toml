@@ -1,0 +1,15 @@
+[package]
+name = "macrokid"
+version = "0.1.0"
+edition = "2021"
+description = "Proc-macro playground: attribute + derive + function-like macros"
+license = "MIT OR Apache-2.0"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "extra-traits"] }
+macrokid_core = { path = "../macrokid_core" }

@@ -1,0 +1,21 @@
+[package]
+name = "iced_macrokid_example"
+version = "0.1.0"
+edition = "2021"
+authors = ["Macrokid Contributors"]
+description = "Demonstrates macrokid integration with Iced GUI framework"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Depend only on macrokid_core and proc-macro basics to keep this proc-macro crate
+# independent from Iced at compile time. The generated code will reference `iced::...`
+# but this crate itself does not require Iced to compile.
+macrokid_core = { path = "../../macrokid_core" }
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["full"] }
+
+[lib]
+name = "iced_macrokid"
+path = "src/lib.rs"
+proc-macro = true

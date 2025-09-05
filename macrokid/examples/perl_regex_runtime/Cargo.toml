@@ -1,0 +1,8 @@
+[package]
+name = "perl_regex_runtime"
+version = "0.1.0"
+edition = "2021"
+description = "Runtime support for Perl-like regex DSL"
+
+[dependencies]
+regex = "1"

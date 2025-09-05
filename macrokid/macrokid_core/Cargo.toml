@@ -1,0 +1,17 @@
+[package]
+name = "macrokid_core"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight helpers to author proc-macros without touching syn/quote directly"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "extra-traits"] }
+log = { version = "0.4", optional = true }
+
+[features]
+default = []
+log = ["dep:log"]
+pattern_dsl = []

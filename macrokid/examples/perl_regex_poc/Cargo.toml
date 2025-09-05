@@ -1,0 +1,15 @@
+[package]
+name = "perl_regex_poc"
+version = "0.1.0"
+edition = "2021"
+description = "Proof of concept: Perl-like regex DSL using macrokid_core"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "extra-traits"] }
+macrokid_core = { path = "../../macrokid_core" }
+perl_regex_runtime = { path = "../perl_regex_runtime" }
