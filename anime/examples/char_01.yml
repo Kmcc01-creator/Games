@@ -1,0 +1,25 @@
+id: "char_01"
+proportions:
+  head_scale: 1.15
+  eye_scale: 1.25
+  limb_len: { arm: 0.95, leg: 1.08 }
+hair:
+  style: "twin_tails"
+  strands: 16
+  stiffness: 0.6
+  damping: 0.12
+clothes:
+  top: "sailor"
+  skirt_folds: 12
+palette:
+  skin:  ["#F7D1C4", "#E9B4A6", "#C07E70"]
+  hair:  ["#332244", "#22162F", "#110A18"]
+  cloth: ["#324B9A", "#273A78", "#1A2550"]
+shading:
+  bands: 3
+  face_shadow_threshold: 0.63
+  cloth_shadow_threshold: 0.55
+lines:
+  width_px: 2.0
+  crease_angle_deg: 42
+

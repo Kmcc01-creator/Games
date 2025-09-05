@@ -1,0 +1,14 @@
+[package]
+name = "stylize-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+stylize-core = { path = "../stylize-core" }
+image = { version = "0.24", default-features = false, features = ["png"] }
+
+[features]
+default = []
+vulkan = ["stylize-core/vulkan"]

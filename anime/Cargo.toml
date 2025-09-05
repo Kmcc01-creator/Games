@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "stylize-core",
+    "stylize-cli",
+]
+resolver = "2"
+

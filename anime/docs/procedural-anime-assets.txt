@@ -1,0 +1,241 @@
+Source: shared chat summary (offline copy)
+
+You said:
+I want to try to create some anime styled assets for game development. I suck at drawing. Can you think of a way to create a process using procedural processes to possibly render impressive animations? I think it's a daunting challenge, and we'd have to develop our own rendering process; but it seems doable somehow 
+
+ChatGPT said:
+
+Heck yeah it’s doable. You don’t have to hand-draw every frame to get anime-style results—you can build a stylized, procedural rendering pipeline that spits out “cels” and even sprite sheets. Here’s a concrete, end-to-end plan you can start implementing with Vulkan + Rust (Ash) and your SDF/compute inclinations.
+
+High-level blueprint
+
+    Parametric assets (“Asset DNA”)
+
+        Characters, props, and hair are defined by compact parameter sets (heights, head/eye proportions, hair bangs, cloth folds, palette).
+
+        Geometry sources:
+
+            3D, low-poly, rigged meshes for bodies/clothes.
+
+            SDF primitives for facial features, effects, and stylized accessories (great for clean, editable curves).
+
+        A tiny YAML/JSON schema drives generation, so the same rig can give you many “looks” without redrawing.
+
+    Rig + procedural animation
+
+        Classic skeleton for primary motion.
+
+        Procedural layers for secondary motion (hair, cloth, accessories) via simplified mass-spring or verlet chains.
+
+        Style controllers: squash & stretch, smears, stepped timing, holds, overshoot—parameterized so you can dial “anime-ness.”
+
+    NPR shading to “cel”
+
+        Toon ramps: quantize lighting into 2–4 bands with optional rim/highlight control.
+
+        Clean line art: object-space contours for silhouettes & creases, plus selective post-edges (depth/normal).
+
+        Palette maps: area-specific shadow thresholds (faces vs. cloth), so you get those intentional shadow shapes.
+
+    Temporal coherence
+
+        Reuse seeds/IDs across frames (by vertex/triangle/bone) to eliminate flicker in dithers/edges.
+
+        Reproject edge/stylization buffers with motion vectors before filtering.
+
+    Outputs
+
+        Real-time in-engine playback, or offline sprite sheets / flipbooks (PNG/WebP), or stylized glTF for in-game use.
+
+Minimal technical slice (order of implementation)
+
+A) Asset DNA (tiny example)
+
+Use this to generate a character variant + palettes:
+
+# char_01.yml
+id: "char_01"
+proportions:
+  head_scale: 1.15
+  eye_scale: 1.25
+  limb_len: { arm: 0.95, leg: 1.08 }
+hair:
+  style: "twin_tails"
+  strands: 16
+  stiffness: 0.6
+  damping: 0.12
+clothes:
+  top: "sailor"
+  skirt_folds: 12
+palette:
+  skin:  ["#F7D1C4", "#E9B4A6", "#C07E70"]
+  hair:  ["#332244", "#22162F", "#110A18"]
+  cloth: ["#324B9A", "#273A78", "#1A2550"]
+shading:
+  bands: 3
+  face_shadow_threshold: 0.63
+  cloth_shadow_threshold: 0.55
+lines:
+  width_px: 2.0
+  crease_angle_deg: 42
+
+B) G-buffer & stylization passes (Vulkan 1.3 dynamic rendering)
+
+    Pass 1: G-buffer (albedo region id, normal, depth, motion vectors, material flags).
+
+    Pass 2: Toon lighting (compute or fragment) with region-aware thresholds.
+
+    Pass 3: Lines (mesh expansion silhouettes + optional post edge from G-buffer).
+
+    Pass 4: Temporal reprojection/resolve for stability.
+
+    Pass 5: Output as texture atlas for sprites (optional compute packer).
+
+C) Toon ramp shader (GLSL fragment, simple & solid)
+
+// inputs: normal N, view V, light L, baseColor, thresholds in push consts
+layout(push_constant) uniform ToonParams {
+    float shadowThreshold;   // e.g. 0.6 face, 0.55 cloth
+    float midThreshold;      // optional third band
+    float rimStrength;       // 0..1
+    float rimWidth;          // 0..1
+} P;
+
+vec3 toonRamp(vec3 N, vec3 L, vec3 V, vec3 baseColor) {
+    float ndl = max(dot(normalize(N), normalize(L)), 0.0);
+
+    // Base 2-band
+    float band = ndl < P.shadowThreshold ? 0.0 : 1.0;
+
+    // Optional 3rd band
+    if (P.midThreshold > 0.0) {
+        band = ndl < P.shadowThreshold ? 0.0
+              : (ndl < P.midThreshold ? 0.5 : 1.0);
+    }
+
+    // Rim light
+    float rim = pow(clamp(1.0 - max(dot(normalize(N), normalize(V)), 0.0), 0.0, 1.0), 1.0 / max(P.rimWidth, 0.001));
+    float rimMask = smoothstep(0.8, 1.0, rim) * P.rimStrength;
+
+    vec3 lit = baseColor * (0.4 + 0.6 * band); // keep some base fill
+    return mix(lit, baseColor, rimMask);
+}
+
+Feed region-specific thresholds via material IDs or a small “stylization LUT” texture indexed per-pixel.
+
+D) Mesh-outline silhouette (clean anime lines)
+
+Render the mesh again, front-face culled, extruded along vertex normals in the vertex shader, unlit black:
+
+// vertex shader
+layout(location=0) in vec3 inPos;
+layout(location=1) in vec3 inNormal;
+layout(push_constant) uniform LinePC { float outlineWidth; } LPC;
+
+void main() {
+    vec3 offset = inNormal * LPC.outlineWidth; // in object or view space; keep consistent
+    gl_Position = MVP * vec4(inPos + offset, 1.0);
+}
+
+Notes:
+
+    Use object-space extrusion for consistent thickness; compensate in projection for distance (or switch to view-space and scale by depth).
+
+    For creases, mark hard edges and duplicate verts; or add a geom/compute step to detect edges above crease_angle_deg.
+
+E) Optional post edge (depth/normal)
+
+After toon pass, add a thin Sobel on depth+normal with blue-noise dither and motion-vector reprojection to keep edges stable when the camera moves.
+
+F) Procedural secondary motion (hair/cloth)
+
+    Simulate chains (bones or particles) with verlet; each frame, apply constraints and then project back to the rig.
+
+    Add artist knobs: stiffness, damping, gravity, wind noise. Clamp maximum angle to avoid wild whipping.
+
+G) Smears, holds, and accents (procedural “sakuga”)
+
+    Smear frames: when bone angular velocity > threshold, spawn a basis-aligned stretched mesh (or extrude along velocity) for one frame.
+
+    Stepped timing: per bone/clip, quantize animation time to 6–12 fps while the camera stays 60 fps; blend in/out so it doesn’t pop.
+
+    Impact frames: flash a high-key rim or add simple speed lines (texture quads) triggered by event markers.
+
+H) Temporal coherence
+
+    Store per-vertex ID in a buffer; derive a stylization seed from (meshID, triID, materialID).
+
+    Reproject the previous frame’s toon band + edge buffers using motion vectors before blending—this nukes shimmer.
+
+    Keep outline thickness in screen space but filtered temporally (min/max clamp across 3 frames).
+
+Two viable “styles” to pick from
+
+    3D NPR → 2D cels (recommended)
+
+        Rigged 3D meshes, toon + outlines → export sprite sheets or render real-time.
+
+        Pros: camera parallax, reusable rigs, easy animation layering.
+
+        Fits Vulkan + compute well and your RDNA3 goals.
+
+    Screen-space SDF characters (2.5D)
+
+        Characters composed of SDF primitives in fragment/compute; bones warp SDF parameters.
+
+        Pros: razor-sharp, perfect curves, tiny memory.
+
+        Cons: more shader math; trickier occlusion/interaction; but gorgeous for faces/eyes and FX.
+
+Suggested module layout (Rust + Ash)
+
+    stylize-core/
+
+        asset_dna/ (YAML schema + generator → meshes/SDF params/palettes)
+
+        rig/ (skeleton, IK, blendspaces, motion graph)
+
+        secondary/ (verlet chains, cloth lite)
+
+        render/
+
+            gbuffer.rs (dynamic rendering setup)
+
+            toon.rs (fragment/compute pipelines, ramp LUTs)
+
+            outline.rs (silhouette pass, crease detection)
+
+            post.rs (edges, blue-noise dither, temporal reprojection)
+
+            sprite_pack.rs (compute atlas packer)
+
+        fx/ (smears, speedlines, glints)
+
+        export/ (PNG/WebP sprite sheets, metadata JSON)
+
+Keep thresholds, band counts, line widths in push constants for interactive tweaking.
+
+Starter tasks you can do today
+
+    G-buffer + toon: implement the toon shader above with a 2-band ramp and per-material thresholds.
+
+    Silhouette pass: render backfaces expanded along normals; add distance scaling so line width is stable on camera dolly.
+
+    One procedural animation: idle breathing (sinusoidal chest/shoulder scale + micro-head bob), then a walk cycle in a 2D blendspace.
+
+    Hair chains: add two verlet chains for twin tails using your YAML params.
+
+    Sprite export: render 16 frames around the y-axis → pack to a 4×4 atlas + JSON (frame rects + anchor).
+
+Extra tricks for “anime look”
+
+    Face maps: drive face shadow with a painted mask (or an SDF ellipse under the cheekbone) so you get those intentional shadow shapes rather than pure lambert.
+
+    Spec hits: a 1D highlight ramp (thin white band) for eyes/hair; threshold by view-half-vector dot normal.
+
+    Color design: clamp saturation in shadows; slight hue shift in shadow band (cooler) and lights (warmer).
+
+    Line culling: hide interior edges on skin; keep only occluding contour+select creases to avoid “noisy” lines.
+
+If you want, I can drop in a tiny Rust/Ash project skeleton (dynamic rendering, one toon pass + outline) and a YAML loader so you can start swapping “DNA” presets and see variant characters immediately.
+
