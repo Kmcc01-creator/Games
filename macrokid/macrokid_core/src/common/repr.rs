@@ -30,7 +30,7 @@ pub struct ReprInfo {
 }
 
 fn parse_align(lit: LitInt) -> syn::Result<u64> {
-    Ok(lit.base10_parse::<u64>()?)
+    lit.base10_parse::<u64>()
 }
 
 /// Parse a #[repr(...)] attribute into a normalized ReprInfo

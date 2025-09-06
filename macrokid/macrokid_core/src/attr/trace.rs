@@ -63,5 +63,5 @@ pub fn expand_trace(mut func: ItemFn, cfg: TraceConfig) -> TokenStream2 {
         #ret_var
     });
 
-    TokenStream2::from(quote!(#func))
+    quote!(#func)
 }

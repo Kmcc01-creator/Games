@@ -6,10 +6,10 @@ Macrokid’s IR (TypeSpec/EnumSpec/StructSpec/FieldSpec) provides a normalized, 
 
 ## What We Have Today
 
-- Container: `TypeSpec { ident, generics, attrs, kind }` with `TypeKind::{Struct, Enum}`.
+- Container: `TypeSpec { ident, generics, attrs, vis, span, kind }` with `TypeKind::{Struct, Enum}`.
 - Structs: `StructSpec { fields: FieldKind }` where `FieldKind` is `Named/Unnamed/Unit`.
-- Enums: `EnumSpec { variants: Vec<VariantSpec> }` with `VariantSpec { ident, attrs, fields }`.
-- Fields: `FieldSpec { ident, index, attrs, ty, span }` — includes `syn::Type` for type‑aware generation.
+- Enums: `EnumSpec { variants: Vec<VariantSpec> }` with `VariantSpec { ident, attrs, span, discriminant, fields }`.
+- Fields: `FieldSpec { ident, index, attrs, vis, ty, span }` — includes `syn::Type` for type‑aware generation.
 
 Strengths:
 - Clean, normalized shape that avoids low‑level syn details.
@@ -18,10 +18,9 @@ Strengths:
 
 ## Gaps and Opportunities
 
-- Visibility not captured (type/field). Helpful for re‑emitting items or conditional public APIs.
-- Enum discriminants not captured (e.g., `A = 1`). Needed for value‑aware macros.
-- Container/variant spans missing; field spans exist. Helpful for precise diagnostics beyond fields.
-- `#[repr(...)]` info not normalized; FFI and layout‑sensitive macros benefit from this.
+- Query/iterator ergonomics: convenience iterators/selectors across fields/variants.
+- Unified `#[repr(...)]` + layout view across types (available via helpers; could be elevated).
+- Higher-level traversal and meta views for common macro decisions.
 
 ## Roadmap
 
@@ -30,11 +29,10 @@ Strengths:
 - Type inspection utilities: `is_option`, `is_vec`, `unwrap_result`, etc.
 - Repr helper: parse `#[repr(...)]` into a normalized form.
 
-### IR‑B (Light Extensions; Breaking)
-- Add visibility to `TypeSpec`/`FieldSpec`.
-- Add spans to `TypeSpec`/`VariantSpec`.
-- Add `discriminant: Option<syn::Expr>` to `VariantSpec`.
-- Provide accessor methods and migration notes to reduce positional destructuring.
+### IR‑B (Landed)
+- Visibility and spans added across container/variant/field.
+- Enum discriminants captured.
+- Migration guidance: prefer named-field access over positional destructuring.
 
 ### IR‑C (Ergonomics)
 - Query API (iterators over filtered fields/variants).
@@ -43,4 +41,3 @@ Strengths:
 ## Decision
 
 Proceed with IR‑A now (non‑breaking helpers). Plan IR‑B changes with a minor version bump (pre‑1.0) and document migration. Re‑evaluate IR‑C based on real usage after IR‑A lands.
-

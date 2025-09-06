@@ -52,6 +52,10 @@ fn main() {
     println!("Mode: {}", Mode::Fast);
     println!("Mode (custom): {}", Mode::Slow);
     println!("Struct display: {}", Point(1, 2));
+    // Touch Point fields so they are not considered dead code in this demo
+    let p = Point(3, 4);
+    let Point(a, b) = p;
+    let _sum = a + b;
 
     // Advanced custom derive: DebugVerbose 
     let config = Config {
@@ -60,6 +64,8 @@ fn main() {
         port: 8080,
     };
     println!("Config (verbose debug): {:?}", config);
+    // Ensure skipped field participates in runtime to avoid dead code
+    let _sk_len = config.secret_key.len();
 
     // Attribute macro: trace function execution
     let n = work(Mode::Slow);
@@ -68,12 +74,15 @@ fn main() {
     // Demonstrate Display2 using semantic helper
     #[derive(Display2)]
     enum State { One, Two }
-    println!("State: {}", State::One);
+    println!("State: {} / {}", State::One, State::Two);
 
     // Demonstrate DisplayDSL (pattern DSL) for enums
     #[derive(DisplayDSL)]
     enum Kind { A, B(i32), C { x: i32 } }
     println!("Kind: {} / {} / {}", Kind::A, Kind::B(1), Kind::C { x: 2 });
+    // Touch Kind variant fields to avoid dead code
+    if let Kind::B(v) = Kind::B(7) { let _ = v; }
+    if let Kind::C { x } = (Kind::C { x: 9 }) { let _ = x; }
 
     // Demonstrate FirstExposed for named-field struct
     #[derive(FirstExposed, Debug)]
@@ -84,6 +93,7 @@ fn main() {
     }
 
     let user = User { id: 1, name: "Alice" };
+    let _ = user.id;
     if let Some((key, val)) = user.first_exposed() {
         println!("first_exposed: {} = {:?}", key, val);
     }

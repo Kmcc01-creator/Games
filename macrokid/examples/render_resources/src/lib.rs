@@ -6,7 +6,7 @@ use macrokid_core::{
     common::attrs::{validate_attrs, AttrSpec, AttrType, AttrValue, has_attr},
     diag::{err_at_span},
 };
-use quote::{quote, quote_spanned};
+use quote::quote;
 use syn::{parse_macro_input, DeriveInput};
 
 // Note: types/traits live in render_resources_support
@@ -42,7 +42,7 @@ fn expand_inner(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
     // Collect and validate
     #[derive(Clone, Debug)]
-    struct Rec { field: String, set: u32, binding: u32, kind: &'static str, span: proc_macro2::Span }
+    struct Rec { field: String, set: u32, binding: u32, kind: &'static str, _span: proc_macro2::Span }
     let mut out: Vec<Rec> = Vec::new();
     use std::collections::HashSet;
     let mut seen: HashSet<(u32, u32)> = HashSet::new();
@@ -64,7 +64,7 @@ fn expand_inner(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             if !seen.insert((set, binding)) {
                 return Err(err_at_span(span, &format!("duplicate (set={}, binding={})", set, binding)));
             }
-            out.push(Rec { field: fname, set, binding, kind, span });
+            out.push(Rec { field: fname, set, binding, kind, _span: span });
         }
     }
 

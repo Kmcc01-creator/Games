@@ -65,7 +65,7 @@ This document provides a deep dive into the technical architecture, design decis
 - Fields: named, unnamed (tuple), and unit forms are normalized via `FieldKind`.
 - Generics: impl generation preserves generics, lifetimes, and where-clauses.
 - Attributes: exposed across type/variant/field with modern syn 2.x parsing.
-- Note: Field type information is not part of `FieldSpec` yet by design to keep IR lean.
+- Field types and metadata: `FieldSpec` includes `ty: syn::Type` and `vis: Visibility`. `TypeSpec` includes `vis: Visibility` and `span: Span`. `VariantSpec` includes `span: Span` and `discriminant: Option<syn::Expr>`.
 
 ## 📦 Crate Structure
 
@@ -183,11 +183,11 @@ Thin wrapper crate providing ready-to-use macros:
 use syn::{parse_macro_input, ItemFn};
 // Attribute macro entry point
 #[proc_macro_attribute]
-pub fn trace(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn trace(attr: TokenStream, item: TokenStream) -> TokenStream {
     let func: ItemFn = parse_macro_input!(item as ItemFn);
-    
-    // Delegate to framework
-    macrokid_core::attr::trace::expand_trace(func, None).into()
+    // Parse options into TraceConfig (prefix/release/logger) and delegate
+    let cfg = /* build macrokid_core::attr::trace::TraceConfig from attr */;
+    macrokid_core::attr::trace::expand_trace(func, cfg).into()
 }
 
 // Function-like macro entry point

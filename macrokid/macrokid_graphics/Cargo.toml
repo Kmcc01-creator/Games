@@ -1,0 +1,10 @@
+[package]
+name = "macrokid_graphics"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+macrokid_core = { path = "../macrokid_core" }
+
+[dev-dependencies]
+macrokid_graphics_derive = { path = "../macrokid_graphics_derive" }

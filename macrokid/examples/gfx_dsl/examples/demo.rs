@@ -1,7 +1,7 @@
 use gfx_dsl::vk_engine;
 use gfx_dsl_support::{Engine, VulkanBackend};
 use render_resources::{ResourceBinding, BufferLayout};
-use render_resources_support::{ResourceBindings, VertexLayout};
+// Traits are used by derive expansions; no direct imports needed here.
 
 vk_engine! {
     {
@@ -54,6 +54,9 @@ fn main() {
     }
 
     println!("\n== Resource Bindings ==");
+    // Touch fields to ensure example reads them at runtime
+    fn touch_material_fields(m: &Material) { let _ = (&m.matrices, &m.albedo, &m.albedo_sampler); }
+    fn touch_vertex_fields(v: &Vertex) { let _ = (&v.pos, &v.normal, &v.uv); }
     for b in Material::describe_bindings() {
         println!("field={} set={} binding={} kind={:?}", b.field, b.set, b.binding, b.kind);
     }
@@ -63,6 +66,10 @@ fn main() {
     }
     let vb = Vertex::describe_vertex_buffer();
     println!("buffer: stride={} step={:?}", vb.stride, vb.step);
+    let m = Material { matrices: Matrices, albedo: Texture2D, albedo_sampler: Sampler };
+    touch_material_fields(&m);
+    let v = Vertex { pos: [0.0; 3], normal: [0.0; 3], uv: [0.0; 2] };
+    touch_vertex_fields(&v);
 
     // Create engine using Vulkan backend and validate + initialize pipelines
     let engine = Engine::<VulkanBackend>::new_from_config(&mgfx_cfg::CONFIG);

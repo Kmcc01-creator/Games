@@ -6,7 +6,7 @@ use syn::{
     parse::{Parse, ParseStream},
     parse_macro_input, Ident, LitBool, LitInt, LitStr, Result, Token,
 };
-use macrokid_core::diag::{err_on, err_at_span};
+use macrokid_core::diag::err_on;
 
 mod kw {
     syn::custom_keyword!(app);

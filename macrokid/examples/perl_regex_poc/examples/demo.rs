@@ -1,5 +1,5 @@
 use perl_regex_poc::{regex_match, regex_subst};
-use perl_regex_runtime::{PerlRegexMatch, PerlRegexSubst};
+// The runtime types are used via the macros; no direct imports needed here.
 
 fn main() {
     let text = "Hello, World! The year is 2024.";
@@ -29,6 +29,10 @@ fn main() {
     
     println!();
     
+    // Global flag: collect all matches
+    let words = regex_match!(text, r"[A-Za-z]+", "g");
+    println!("All words: {:?}", words.all_matches());
+
     // More complex example
     let email_text = "Contact: john@example.com or support@company.org";
     let email_match = regex_match!(email_text, r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}");

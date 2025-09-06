@@ -106,6 +106,32 @@ pub struct GeometryPass {
 3. Enhance error messages using `macrokid_core::diag`
 4. Add type-state builders from `examples/gfx_dsl_support/src/builder.rs`
 
+### Current Engine Process & Readiness
+
+- Derives produce descriptors and trait impls:
+  - `#[derive(ResourceBinding)]` → static slice of `BindingDesc` + `ResourceBindings` impl.
+  - `#[derive(BufferLayout)]` → static slice of `VertexAttr` + `VertexLayout` impl.
+  - `#[derive(GraphicsPipeline)]` → `PipelineDesc` and `PipelineInfo` impl.
+- Runtime flow in `macrokid_graphics::engine`:
+  - Build `EngineConfig` (via `EngineBuilder` or manual Vec<PipelineDesc>`).
+  - Optionally `validate_config()` for structural checks (non-empty, no duplicates, shader paths present).
+  - Validate pipelines against derives using either:
+    - `engine.validate_pipelines_with::<RB, VL>(&cfg)` or
+    - `cfg.validate_with::<GraphicsValidator<RB, VL>>()` (macrokid_core::common::validate facade).
+  - Initialize pipelines and present (currently logs via the `RenderBackend` default methods).
+
+Readiness for Vulkan (testing/hobby)
+- The current engine provides structure and validation; the backend is a logging stub.
+- Implementing a minimal Vulkan backend (e.g., with `ash`) is viable for hobby/testing but requires:
+  - Device/swapchain setup (surface creation via `winit`/`raw-window-handle`).
+  - Shader module creation from SPIR-V; map `ShaderPaths` to compiled assets.
+  - Pipeline layout from `ResourceBindings`; descriptor set layouts + pools and allocation.
+  - Vertex input state from `VertexLayout` (locations, formats, strides, step mode).
+  - Render pass, framebuffers, command buffers, submission, and synchronization.
+- Recommendation: For a fast path to drawing, integrate `wgpu` behind a `wgpu` backend that translates `PipelineDesc`/`ResourceBindings`/`VertexLayout` into wgpu pipeline descriptors. This reduces boilerplate while keeping the same derives + engine.
+
+Summary: The abstractions and validation are in place for hobby/testing. A Vulkan backend can be implemented incrementally; wgpu offers a quicker route for early visuals. The derives (resources/layout/pipeline) already encode the data needed to wire either backend.
+
 #### 1.2 Resource Management (`resources/`)
 Migrate resource binding work from `examples/render_resources*`:
 

@@ -5,5 +5,13 @@ pub mod patterns;
 pub mod diag;
 pub mod type_utils;
 pub mod repr;
+pub mod walk;
+pub mod templates;
+pub mod attr_schema;
+pub mod collect;
+pub mod codegen;
+pub mod validate;
 #[cfg(feature = "pattern_dsl")]
 pub mod pattern_dsl;
+#[cfg(feature = "codegen")]
+pub mod gen;

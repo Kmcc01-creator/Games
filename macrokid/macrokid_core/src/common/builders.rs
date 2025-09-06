@@ -154,6 +154,8 @@ impl MatchArmBuilder {
 
     /// Current number of arms (for heuristics)
     pub fn len(&self) -> usize { self.arms.len() }
+    /// Whether there are no arms
+    pub fn is_empty(&self) -> bool { self.arms.is_empty() }
 }
 
 impl Default for MatchArmBuilder {

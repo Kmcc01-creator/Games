@@ -8,7 +8,7 @@ fn single_generic_arg(path: &syn::Path) -> Option<&GenericArgument> {
 }
 
 fn last_ident_is(path: &syn::Path, name: &str) -> bool {
-    path.segments.last().map_or(false, |seg| seg.ident == name)
+    path.segments.last().is_some_and(|seg| seg.ident == name)
 }
 
 /// Returns true if type is `Option<T>`
@@ -17,7 +17,7 @@ pub fn is_option(ty: &Type) -> bool {
 }
 
 /// If type is `Option<T>`, return `T`
-pub fn unwrap_option<'a>(ty: &'a Type) -> Option<&'a Type> {
+pub fn unwrap_option(ty: &Type) -> Option<&Type> {
     if let Type::Path(tp) = ty {
         if last_ident_is(&tp.path, "Option") {
             return single_generic_arg(&tp.path).and_then(|ga| match ga { GenericArgument::Type(t) => Some(t), _ => None });
@@ -32,7 +32,7 @@ pub fn is_vec(ty: &Type) -> bool {
 }
 
 /// If type is `Vec<T>`, return `T`
-pub fn unwrap_vec<'a>(ty: &'a Type) -> Option<&'a Type> {
+pub fn unwrap_vec(ty: &Type) -> Option<&Type> {
     if let Type::Path(tp) = ty {
         if last_ident_is(&tp.path, "Vec") {
             return single_generic_arg(&tp.path).and_then(|ga| match ga { GenericArgument::Type(t) => Some(t), _ => None });
@@ -42,7 +42,7 @@ pub fn unwrap_vec<'a>(ty: &'a Type) -> Option<&'a Type> {
 }
 
 /// Returns Some((T, E)) if type is `Result<T, E>`
-pub fn unwrap_result<'a>(ty: &'a Type) -> Option<(&'a Type, &'a Type)> {
+pub fn unwrap_result(ty: &Type) -> Option<(&Type, &Type)> {
     if let Type::Path(tp) = ty {
         if last_ident_is(&tp.path, "Result") {
             if let Some(PathArguments::AngleBracketed(ab)) = tp.path.segments.last().map(|s| &s.arguments) {
@@ -60,7 +60,7 @@ pub fn is_box(ty: &Type) -> bool {
 }
 
 /// If type is `Box<T>`, return `T`
-pub fn unwrap_box<'a>(ty: &'a Type) -> Option<&'a Type> {
+pub fn unwrap_box(ty: &Type) -> Option<&Type> {
     if let Type::Path(tp) = ty {
         if last_ident_is(&tp.path, "Box") {
             return single_generic_arg(&tp.path).and_then(|ga| match ga { GenericArgument::Type(t) => Some(t), _ => None });
@@ -75,7 +75,7 @@ pub fn is_phantom_data(ty: &Type) -> bool {
 }
 
 /// If type is `PhantomData<T>`, return `T`
-pub fn unwrap_phantom_data<'a>(ty: &'a Type) -> Option<&'a Type> {
+pub fn unwrap_phantom_data(ty: &Type) -> Option<&Type> {
     if let Type::Path(tp) = ty {
         if last_ident_is(&tp.path, "PhantomData") {
             return single_generic_arg(&tp.path).and_then(|ga| match ga { GenericArgument::Type(t) => Some(t), _ => None });

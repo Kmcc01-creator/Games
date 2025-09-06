@@ -55,7 +55,7 @@ fn expand_inner(input: DeriveInput) -> syn::Result<TokenStream2> {
                             }
                             syn::Meta::NameValue(kv) if kv.path.is_ident("tuple") => {
                                 if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = &kv.value {
-                                    let spec = parse_tuple_spec(&s)?;
+                                    let spec = parse_tuple_spec(s)?;
                                     tuple_spec = Some(spec);
                                 } else {
                                     return Err(syn::Error::new(kv.value.span(), "builder(tuple = \"...\") expects string"));

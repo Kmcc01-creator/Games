@@ -18,6 +18,26 @@ pub fn err_at_span(span: Span, msg: &str) -> SynError {
     SynError::new(span, msg)
 }
 
+/// Collector that aggregates multiple syn::Error values and returns a single error.
+#[derive(Default)]
+pub struct Collector {
+    agg: Option<SynError>,
+}
+
+impl Collector {
+    pub fn new() -> Self { Self { agg: None } }
+    pub fn push(&mut self, err: SynError) {
+        if let Some(ref mut a) = self.agg {
+            a.combine(err);
+        } else {
+            self.agg = Some(err);
+        }
+    }
+    pub fn is_empty(&self) -> bool { self.agg.is_none() }
+    pub fn has_errors(&self) -> bool { self.agg.is_some() }
+    pub fn into_result<T>(self, ok: T) -> Result<T, SynError> { self.agg.map_or(Ok(ok), Err) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

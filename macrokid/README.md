@@ -21,6 +21,10 @@ macrokid/
 ├── examples/
 │   └── custom_derive/     # Example: Custom derive macros
 └── example/               # Usage demonstrations
+macrokid_graphics/         # Experimental graphics runtime
+macrokid_graphics_derive/  # Experimental graphics derives (resources, buffers, pipelines)
+macrokid_clang_exec/       # Exec-based Clang PoC for C/C++ headers
+examples/graphics_demo/    # Demo using graphics derives + Clang PoC build script
 ```
 
 ## 🚀 Quick Start
@@ -123,6 +127,16 @@ Provides ready-to-use macros built with the framework:
 Demonstrates advanced framework usage:
 - `#[derive(Display)]` with `#[display("name")]` attributes
 - `#[derive(DebugVerbose)]` with field-level `#[skip]` support
+
+## 🧪 Experiments
+
+We’re actively exploring graphics-focused DSLs and cross-language tooling:
+
+- `macrokid_graphics` + `macrokid_graphics_derive`: ResourceBinding, BufferLayout, GraphicsPipeline derives.
+- `macrokid_clang_exec`: Exec-based Clang integration to analyze/generate from C/C++ headers.
+- `examples/graphics_demo`: Shows derives in action and emits C/C++ IR when `CLANG_EXEC_DEMO=1`.
+
+See `EXPERIMENTS.md` for current status, usage, and roadmap. These APIs are experimental and may change.
 
 ## 🔧 Technical Details
 

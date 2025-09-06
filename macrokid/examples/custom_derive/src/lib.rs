@@ -20,7 +20,7 @@ mod display_impl {
     use macrokid_core::{
         ir::{FieldKind, TypeKind, TypeSpec}, 
         attrs::attr_string_value,
-        diag::{err_on, err_at_span},
+        diag::err_at_span,
         builders::ImplBuilder,
     };
     use proc_macro2::TokenStream as TokenStream2;
@@ -317,7 +317,7 @@ mod first_exposed_impl {
         // Only meaningful for named-field structs; otherwise always return None
         let method_body = match &spec.kind {
             TypeKind::Struct(st) => match &st.fields {
-                FieldKind::Named(fields) => {
+                FieldKind::Named(_) => {
                     let arms = match_fields(&st.fields, |f| {
                         if let Some(fid) = &f.ident {
                             if has_attr(&f.attrs, "expose") {
@@ -367,7 +367,7 @@ mod display_dsl_impl {
         pattern_dsl as dsl,
     };
     use proc_macro2::TokenStream as TokenStream2;
-    use quote::{quote, ToTokens};
+    use quote::quote;
     use syn::{parse_quote, DeriveInput};
 
     pub fn expand(input: DeriveInput) -> TokenStream2 {
