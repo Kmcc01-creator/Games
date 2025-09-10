@@ -26,9 +26,9 @@ struct Sampler;
 // Describe shader resource bindings via derive
 #[derive(ResourceBinding)]
 struct Material {
-    #[uniform(set = 0, binding = 0)] matrices: Matrices,
-    #[texture(set = 0, binding = 1)] albedo: Texture2D,
-    #[sampler(set = 0, binding = 2)] albedo_sampler: Sampler,
+    #[uniform(set = 0, binding = 0, stages = "vs|fs")] matrices: Matrices,
+    #[texture(set = 0, binding = 1, stages = "fs")] albedo: Texture2D,
+    #[sampler(set = 0, binding = 2, stages = "fs")] albedo_sampler: Sampler,
 }
 
 // Describe vertex layout via derive (offsets will be inferred)
@@ -55,6 +55,12 @@ fn main() {
         shaders: ShaderPaths { vs: "shaders/triangle.vert", fs: "shaders/triangle.frag" },
         topology: Topology::TriangleList,
         depth: true,
+        raster: None,
+        blend: None,
+        samples: None,
+        depth_stencil: None,
+        dynamic: None,
+        push_constants: None,
     };
 
     // Build engine config using the builder (no macros required)

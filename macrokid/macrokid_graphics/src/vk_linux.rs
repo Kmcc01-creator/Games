@@ -1,0 +1,1243 @@
+//! Linux-facing Vulkan app scaffold using `ash` + `winit`.
+//!
+//! This module is gated behind the `vulkan-linux` feature to avoid pulling
+//! heavy graphics deps by default. It focuses on minimal instance/device
+//! bring-up and an event loop. Swapchain and rendering are intentionally
+//! deferred to keep the first integration small and reviewable.
+#![cfg(feature = "vulkan-linux")]
+
+use crate::engine::EngineConfig;
+use crate::resources::{ResourceBindings, VertexLayout, StepMode};
+
+use ash::{vk, Entry, Instance};
+use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
+use std::ffi::{CString, CStr};
+
+#[derive(Debug)]
+pub enum VkError {
+    General(String),
+}
+
+impl From<&str> for VkError { fn from(s: &str) -> Self { VkError::General(s.into()) } }
+impl From<String> for VkError { fn from(s: String) -> Self { VkError::General(s) } }
+
+/// Optional app-supplied resources for demo purposes.
+#[derive(Debug, Default)]
+pub struct AppResources {
+    pub uniform_data: Option<Vec<u8>>,      // initial data copied into each frame's 64-byte uniform buffer
+    pub image_rgba: Option<[u8; 4]>,        // solid color written to a 1x1 image if provided
+    pub image_size: Option<(u32, u32)>,     // size for image_pixels
+    pub image_pixels: Option<Vec<u8>>,      // RGBA8 pixels; len == w*h*4 when image_size is Some
+}
+
+struct VkCore {
+    _entry: Entry,
+    instance: Instance,
+    surface_loader: ash::extensions::khr::Surface,
+    surface: vk::SurfaceKHR,
+    phys: vk::PhysicalDevice,
+    device: ash::Device,
+    queue: vk::Queue,
+    queue_family_index: u32,
+    // Swapchain + views
+    swapchain_loader: ash::extensions::khr::Swapchain,
+    swapchain: vk::SwapchainKHR,
+    surface_format: vk::SurfaceFormatKHR,
+    extent: vk::Extent2D,
+    present_mode: vk::PresentModeKHR,
+    images: Vec<vk::Image>,
+    views: Vec<vk::ImageView>,
+    // Render pass + framebuffers
+    render_pass: vk::RenderPass,
+    framebuffers: Vec<vk::Framebuffer>,
+    // Depth resources
+    depth_format: vk::Format,
+    depth_image: vk::Image,
+    depth_memory: vk::DeviceMemory,
+    depth_view: vk::ImageView,
+    // Stub pipeline layout used for now
+    pipeline_layout: vk::PipelineLayout,
+    pipeline: vk::Pipeline,
+    set_layouts: Vec<vk::DescriptorSetLayout>,
+    descriptor_pool: vk::DescriptorPool,
+    descriptor_sets_per_frame: Vec<Vec<vk::DescriptorSet>>,
+    // Minimal demo resources for descriptor writes
+    uniform_buffers: Vec<vk::Buffer>,
+    uniform_memories: Vec<vk::DeviceMemory>,
+    demo_sampler: vk::Sampler,
+    demo_image: vk::Image,
+    demo_image_memory: vk::DeviceMemory,
+    demo_image_view: vk::ImageView,
+    dyn_viewport: bool,
+    dyn_scissor: bool,
+    // Command recording + sync
+    command_pool: vk::CommandPool,
+    command_buffers: Vec<vk::CommandBuffer>,
+    image_available: Vec<vk::Semaphore>,
+    render_finished: Vec<vk::Semaphore>,
+    in_flight: Vec<vk::Fence>,
+    // Dummy vertex buffer (to demonstrate binding)
+    vertex_buffer: vk::Buffer,
+    vertex_memory: vk::DeviceMemory,
+}
+
+impl VkCore {
+    fn new_with<RB, VL>(window: &winit::window::Window, cfg: &EngineConfig, resources: Option<&AppResources>) -> Result<Self, VkError>
+    where
+        RB: ResourceBindings,
+        VL: VertexLayout,
+    {
+        unsafe {
+            // 1) Entry + Instance
+            let entry = Entry::linked();
+            let app_name = CString::new("macrokid_vulkan_linux").unwrap();
+            let app_info = vk::ApplicationInfo::builder()
+                .application_name(&app_name)
+                .application_version(vk::make_api_version(0, 0, 1, 0))
+                .engine_name(&app_name)
+                .engine_version(vk::make_api_version(0, 0, 1, 0))
+                .api_version(vk::API_VERSION_1_2);
+
+            let display_handle = window.raw_display_handle();
+            let window_handle = window.raw_window_handle();
+            let mut ext_names = ash_window::enumerate_required_extensions(display_handle)
+                .map_err(|e| VkError::General(format!("enumerate_required_extensions: {e}")))?
+                .to_vec();
+
+            // Surface + platform extensions are included via ash-window helper above.
+            let create_info = vk::InstanceCreateInfo::builder().application_info(&app_info).enabled_extension_names(&ext_names);
+            let instance = entry.create_instance(&create_info, None)
+                .map_err(|e| VkError::General(format!("create_instance: {e}")))?;
+
+            // 2) Surface
+            let surface = ash_window::create_surface(&entry, &instance, display_handle, window_handle, None)
+                .map_err(|e| VkError::General(format!("create_surface: {e}")))?;
+            let surface_loader = ash::extensions::khr::Surface::new(&entry, &instance);
+
+            // 3) Physical device + queue family supporting graphics + present
+            let phys_devices = instance.enumerate_physical_devices()
+                .map_err(|e| VkError::General(format!("enumerate_physical_devices: {e}")))?;
+
+            // Build ordered candidates honoring adapter_index or adapter_preference
+            let mut ordered: Vec<vk::PhysicalDevice> = Vec::new();
+            if let Some(idx) = cfg.options.adapter_index {
+                if idx < phys_devices.len() { ordered.push(phys_devices[idx]); }
+            }
+            if ordered.is_empty() {
+                if let Some(pref) = cfg.options.adapter_preference.as_deref() {
+                    let want = match pref.to_ascii_lowercase().as_str() {
+                        "discrete" => Some(vk::PhysicalDeviceType::DISCRETE_GPU),
+                        "integrated" => Some(vk::PhysicalDeviceType::INTEGRATED_GPU),
+                        "virtual" => Some(vk::PhysicalDeviceType::VIRTUAL_GPU),
+                        "cpu" => Some(vk::PhysicalDeviceType::CPU),
+                        _ => None,
+                    };
+                    if let Some(want_ty) = want {
+                        for &pd in &phys_devices {
+                            let props = instance.get_physical_device_properties(pd);
+                            if props.device_type == want_ty { ordered.push(pd); }
+                        }
+                        for &pd in &phys_devices { if !ordered.contains(&pd) { ordered.push(pd); } }
+                    }
+                }
+            }
+            if ordered.is_empty() { ordered = phys_devices.clone(); }
+
+            let (phys, qfi) = {
+                let mut chosen: Option<(vk::PhysicalDevice, u32)> = None;
+                'outer: for &pd in &ordered {
+                    let qfams = instance.get_physical_device_queue_family_properties(pd);
+                    for (i, qf) in qfams.iter().enumerate() {
+                        let i_u32 = i as u32;
+                        let supports_graphics = qf.queue_flags.contains(vk::QueueFlags::GRAPHICS);
+                        let present_ok = surface_loader.get_physical_device_surface_support(pd, i_u32, surface).unwrap_or(false);
+                        if supports_graphics && present_ok { chosen = Some((pd, i_u32)); break 'outer; }
+                    }
+                }
+                chosen.ok_or_else(|| VkError::General("no suitable queue family with graphics+present".into()))?
+            };
+
+            // 4) Logical device + queue (+ swapchain extension)
+            let priorities = [1.0f32];
+            let qci = [vk::DeviceQueueCreateInfo::builder().queue_family_index(qfi).queue_priorities(&priorities).build()];
+            let device_exts = [ash::extensions::khr::Swapchain::name().as_ptr()];
+            let device_info = vk::DeviceCreateInfo::builder()
+                .queue_create_infos(&qci)
+                .enabled_extension_names(&device_exts);
+            let device = instance.create_device(phys, &device_info, None)
+                .map_err(|e| VkError::General(format!("create_device: {e}")))?;
+            let queue = device.get_device_queue(qfi, 0);
+
+            // 5) Swapchain select + create
+            let surface_caps = surface_loader
+                .get_physical_device_surface_capabilities(phys, surface)
+                .map_err(|e| VkError::General(format!("surface_capabilities: {e}")))?;
+            let surface_formats = surface_loader
+                .get_physical_device_surface_formats(phys, surface)
+                .map_err(|e| VkError::General(format!("surface_formats: {e}")))?;
+            // Select color format/colorspace, honoring cfg.options when provided
+            let map_format = |s: &str| -> Option<vk::Format> {
+                match s {
+                    "B8G8R8A8_SRGB" => Some(vk::Format::B8G8R8A8_SRGB),
+                    "R8G8B8A8_UNORM" => Some(vk::Format::R8G8B8A8_UNORM),
+                    _ => None,
+                }
+            };
+            let map_colorspace = |s: &str| -> Option<vk::ColorSpaceKHR> {
+                match s {
+                    "SRGB_NONLINEAR" => Some(vk::ColorSpaceKHR::SRGB_NONLINEAR),
+                    _ => None,
+                }
+            };
+            let requested_fmt = cfg.options.color_format.and_then(map_format);
+            let requested_cs = cfg.options.color_space.and_then(map_colorspace);
+            let surface_format = surface_formats
+                .iter()
+                .cloned()
+                .find(|f| {
+                    let fmt_ok = requested_fmt.map(|want| f.format == want).unwrap_or(true);
+                    let cs_ok = requested_cs.map(|want| f.color_space == want).unwrap_or(true);
+                    fmt_ok && cs_ok
+                })
+                .or_else(|| surface_formats
+                    .iter()
+                    .cloned()
+                    .find(|f| f.format == vk::Format::B8G8R8A8_SRGB && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR))
+                .or_else(|| surface_formats.first().cloned())
+                .ok_or_else(|| VkError::General("no surface formats".into()))?;
+
+            let present_modes = surface_loader
+                .get_physical_device_surface_present_modes(phys, surface)
+                .map_err(|e| VkError::General(format!("present_modes: {e}")))?;
+            // Determine desired present mode: priority list > explicit option > vsync heuristic
+            let map_present = |s: &str| -> Option<vk::PresentModeKHR> {
+                match s.to_ascii_uppercase().as_str() {
+                    "MAILBOX" => Some(vk::PresentModeKHR::MAILBOX),
+                    "FIFO" => Some(vk::PresentModeKHR::FIFO),
+                    "IMMEDIATE" => Some(vk::PresentModeKHR::IMMEDIATE),
+                    "FIFO_RELAXED" => Some(vk::PresentModeKHR::FIFO_RELAXED),
+                    _ => None,
+                }
+            };
+            let mut present_mode: vk::PresentModeKHR = vk::PresentModeKHR::FIFO; // safe default
+            if let Some(list) = &cfg.options.present_mode_priority {
+                for &name in list.iter() {
+                    if let Some(pm) = map_present(name) {
+                        if present_modes.iter().any(|m| *m == pm) { present_mode = pm; break; }
+                    }
+                }
+                if present_mode == vk::PresentModeKHR::FIFO && !cfg.window.vsync {
+                    // try common low-latency default if not explicitly found
+                    if present_modes.iter().any(|m| *m == vk::PresentModeKHR::MAILBOX) { present_mode = vk::PresentModeKHR::MAILBOX; }
+                }
+            } else {
+                let desired_present = cfg.options.present_mode.and_then(map_present).or_else(|| {
+                    if cfg.window.vsync { Some(vk::PresentModeKHR::FIFO) } else { Some(vk::PresentModeKHR::MAILBOX) }
+                }).unwrap();
+                present_mode = present_modes.iter().cloned().find(|m| *m == desired_present)
+                    .or_else(|| present_modes.iter().cloned().find(|m| *m == vk::PresentModeKHR::MAILBOX))
+                    .unwrap_or(vk::PresentModeKHR::FIFO);
+            }
+
+            // Log chosen adapter and present mode
+            let props = instance.get_physical_device_properties(phys);
+            let name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }.to_string_lossy();
+            let present_mode_name = match present_mode {
+                vk::PresentModeKHR::IMMEDIATE => "IMMEDIATE",
+                vk::PresentModeKHR::MAILBOX => "MAILBOX",
+                vk::PresentModeKHR::FIFO => "FIFO",
+                vk::PresentModeKHR::FIFO_RELAXED => "FIFO_RELAXED",
+                vk::PresentModeKHR::SHARED_DEMAND_REFRESH => "SHARED_DEMAND_REFRESH",
+                vk::PresentModeKHR::SHARED_CONTINUOUS_REFRESH => "SHARED_CONTINUOUS_REFRESH",
+                _ => "UNKNOWN",
+            };
+            let device_type_name = match props.device_type {
+                vk::PhysicalDeviceType::INTEGRATED_GPU => "IntegratedGPU",
+                vk::PhysicalDeviceType::DISCRETE_GPU => "DiscreteGPU",
+                vk::PhysicalDeviceType::VIRTUAL_GPU => "VirtualGPU",
+                vk::PhysicalDeviceType::CPU => "CPU",
+                _ => "Other",
+            };
+            println!("[vk-linux] adapter='{}' type={} present_mode={}", name, device_type_name, present_mode_name);
+
+            let win_size = window.inner_size();
+            let extent = if surface_caps.current_extent.width != u32::MAX {
+                surface_caps.current_extent
+            } else {
+                vk::Extent2D {
+                    width: win_size.width.clamp(surface_caps.min_image_extent.width, surface_caps.max_image_extent.width),
+                    height: win_size.height.clamp(surface_caps.min_image_extent.height, surface_caps.max_image_extent.height),
+                }
+            };
+
+            let mut image_count = surface_caps.min_image_count + 1;
+            if let Some(req) = cfg.options.swapchain_images { image_count = req.max(surface_caps.min_image_count); }
+            if surface_caps.max_image_count > 0 {
+                image_count = image_count.min(surface_caps.max_image_count);
+            }
+
+            let (image_sharing_mode, queue_family_indices) = (vk::SharingMode::EXCLUSIVE, Vec::<u32>::new());
+            let swapchain_info = vk::SwapchainCreateInfoKHR::builder()
+                .surface(surface)
+                .min_image_count(image_count)
+                .image_color_space(surface_format.color_space)
+                .image_format(surface_format.format)
+                .image_extent(extent)
+                .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+                .image_sharing_mode(image_sharing_mode)
+                .queue_family_indices(&queue_family_indices)
+                .pre_transform(surface_caps.current_transform)
+                .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+                .present_mode(present_mode)
+                .clipped(true)
+                .image_array_layers(1);
+
+            let swapchain_loader = ash::extensions::khr::Swapchain::new(&instance, &device);
+            let swapchain = swapchain_loader
+                .create_swapchain(&swapchain_info, None)
+                .map_err(|e| VkError::General(format!("create_swapchain: {e}")))?;
+            let images = swapchain_loader
+                .get_swapchain_images(swapchain)
+                .map_err(|e| VkError::General(format!("get_swapchain_images: {e}")))?;
+
+            // 6) Image views
+            let mut views = Vec::with_capacity(images.len());
+            for &image in &images {
+                let subresource = vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                };
+                let iv_info = vk::ImageViewCreateInfo::builder()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(surface_format.format)
+                    .subresource_range(subresource);
+                let view = device
+                    .create_image_view(&iv_info, None)
+                    .map_err(|e| VkError::General(format!("create_image_view: {e}")))?;
+                views.push(view);
+            }
+
+            // 7) Render pass (color + optional depth)
+            // Resolve sample count for attachments from first pipeline or override via options
+            let samples_from_opt = |n: u32| -> vk::SampleCountFlags { match n { 1 => vk::SampleCountFlags::TYPE_1, 2 => vk::SampleCountFlags::TYPE_2, 4 => vk::SampleCountFlags::TYPE_4, 8 => vk::SampleCountFlags::TYPE_8, 16 => vk::SampleCountFlags::TYPE_16, 32 => vk::SampleCountFlags::TYPE_32, 64 => vk::SampleCountFlags::TYPE_64, _ => vk::SampleCountFlags::TYPE_1 } };
+            let first_desc = cfg.pipelines.first().ok_or_else(|| VkError::General("no pipelines in EngineConfig".into()))?;
+            let default_samples = crate::vk_bridge::samples_from(first_desc);
+            let rp_samples = cfg.options.msaa_samples.map(samples_from_opt).unwrap_or(default_samples);
+
+            let color_attachment = vk::AttachmentDescription::builder()
+                .format(surface_format.format)
+                .samples(rp_samples)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .final_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                .build();
+            // Choose a depth format
+            let pick_depth_format = |candidates: &[vk::Format]| -> Option<vk::Format> {
+                for &fmt in candidates { 
+                    let props = instance.get_physical_device_format_properties(phys, fmt);
+                    if props.optimal_tiling_features.contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT) { return Some(fmt); }
+                }
+                None
+            };
+            let map_depth = |s: &str| -> Option<vk::Format> {
+                match s {
+                    "D32_SFLOAT" => Some(vk::Format::D32_SFLOAT),
+                    "D24_UNORM_S8_UINT" => Some(vk::Format::D24_UNORM_S8_UINT),
+                    "D32_SFLOAT_S8_UINT" => Some(vk::Format::D32_SFLOAT_S8_UINT),
+                    _ => None,
+                }
+            };
+            let requested_depth = cfg.options.depth_format.and_then(map_depth);
+            let depth_format = if let Some(df) = requested_depth {
+                pick_depth_format(&[df]).unwrap_or(df)
+            } else {
+                pick_depth_format(&[
+                    vk::Format::D32_SFLOAT,
+                    vk::Format::D32_SFLOAT_S8_UINT,
+                    vk::Format::D24_UNORM_S8_UINT,
+                ]).unwrap_or(vk::Format::D32_SFLOAT)
+            };
+            let depth_attachment = vk::AttachmentDescription::builder()
+                .format(depth_format)
+                .samples(rp_samples)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .build();
+            let color_attachment_ref = vk::AttachmentReference { attachment: 0, layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL };
+            let depth_attachment_ref = vk::AttachmentReference { attachment: 1, layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+            let subpass = vk::SubpassDescription::builder()
+                .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+                .color_attachments(std::slice::from_ref(&color_attachment_ref))
+                .depth_stencil_attachment(&depth_attachment_ref)
+                .build();
+            let dependency = vk::SubpassDependency::builder()
+                .src_subpass(vk::SUBPASS_EXTERNAL)
+                .dst_subpass(0)
+                .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+                .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS)
+                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .build();
+            let atts = [color_attachment, depth_attachment];
+            let rp_info = vk::RenderPassCreateInfo::builder()
+                .attachments(&atts)
+                .subpasses(std::slice::from_ref(&subpass))
+                .dependencies(std::slice::from_ref(&dependency));
+            let render_pass = device
+                .create_render_pass(&rp_info, None)
+                .map_err(|e| VkError::General(format!("create_render_pass: {e}")))?;
+
+            // 8) Depth image/resources
+            let depth_image_info = vk::ImageCreateInfo::builder()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(depth_format)
+                .extent(vk::Extent3D { width: extent.width, height: extent.height, depth: 1 })
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(rp_samples)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                .initial_layout(vk::ImageLayout::UNDEFINED);
+            let depth_image = device.create_image(&depth_image_info, None).map_err(|e| VkError::General(format!("create_image(depth): {e}")))?;
+            let depth_req = device.get_image_memory_requirements(depth_image);
+            let mem_props = instance.get_physical_device_memory_properties(phys);
+            let find_type = |type_bits: u32, flags: vk::MemoryPropertyFlags| -> Option<u32> {
+                for i in 0..mem_props.memory_type_count { if (type_bits & (1 << i)) != 0 && mem_props.memory_types[i as usize].property_flags.contains(flags) { return Some(i); } }
+                None
+            };
+            let depth_type = find_type(depth_req.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+                .or_else(|| find_type(depth_req.memory_type_bits, vk::MemoryPropertyFlags::empty()))
+                .ok_or_else(|| VkError::General("no memory type for depth".into()))?;
+            let depth_alloc = vk::MemoryAllocateInfo::builder().allocation_size(depth_req.size).memory_type_index(depth_type);
+            let depth_memory = device.allocate_memory(&depth_alloc, None).map_err(|e| VkError::General(format!("allocate_memory(depth): {e}")))?;
+            device.bind_image_memory(depth_image, depth_memory, 0).map_err(|e| VkError::General(format!("bind_image_memory(depth): {e}")))?;
+            let depth_aspect = if depth_format == vk::Format::D32_SFLOAT || depth_format == vk::Format::D16_UNORM || depth_format == vk::Format::D32_SFLOAT_S8_UINT || depth_format == vk::Format::D24_UNORM_S8_UINT { vk::ImageAspectFlags::DEPTH } else { vk::ImageAspectFlags::DEPTH };
+            let depth_view_info = vk::ImageViewCreateInfo::builder()
+                .image(depth_image)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(depth_format)
+                .subresource_range(vk::ImageSubresourceRange { aspect_mask: depth_aspect, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
+            let depth_view = device.create_image_view(&depth_view_info, None).map_err(|e| VkError::General(format!("create_image_view(depth): {e}")))?;
+
+            // 9) Framebuffers (color + depth)
+            let mut framebuffers = Vec::with_capacity(views.len());
+            for &view in &views {
+                let attachments = [view, depth_view];
+                let fb_info = vk::FramebufferCreateInfo::builder()
+                    .render_pass(render_pass)
+                    .attachments(&attachments)
+                    .width(extent.width)
+                    .height(extent.height)
+                    .layers(1);
+                let fb = device
+                    .create_framebuffer(&fb_info, None)
+                    .map_err(|e| VkError::General(format!("create_framebuffer: {e}")))?;
+                framebuffers.push(fb);
+            }
+
+            // 9) Descriptor set layouts from ResourceBindings via bridge
+            let by_set = crate::vk_bridge::descriptor_bindings_from::<RB>();
+            let mut set_layouts: Vec<vk::DescriptorSetLayout> = Vec::new();
+            for (_set, mut binds) in by_set.into_iter() {
+                // Ensure deterministic order by binding index
+                binds.sort_by_key(|b| b.binding);
+                let info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&binds);
+                let layout = device
+                    .create_descriptor_set_layout(&info, None)
+                    .map_err(|e| VkError::General(format!("create_descriptor_set_layout: {e}")))?;
+                set_layouts.push(layout);
+            }
+
+            // 9.1) Descriptor pool + set allocation (no writes yet)
+            let mut pool_sizes: ::std::collections::BTreeMap<vk::DescriptorType, u32> = ::std::collections::BTreeMap::new();
+            for b in RB::bindings() {
+                let dtype = match b.kind {
+                    crate::resources::ResourceKind::Uniform => vk::DescriptorType::UNIFORM_BUFFER,
+                    crate::resources::ResourceKind::Texture => vk::DescriptorType::SAMPLED_IMAGE,
+                    crate::resources::ResourceKind::Sampler => vk::DescriptorType::SAMPLER,
+                    crate::resources::ResourceKind::CombinedImageSampler => vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                };
+                *pool_sizes.entry(dtype).or_insert(0) += 1;
+            }
+            // Multiply descriptor counts by number of frames since we allocate per-frame sets
+            let frames = views.len() as u32;
+            let pool_sizes_vec: Vec<vk::DescriptorPoolSize> = pool_sizes
+                .into_iter()
+                .map(|(ty, descriptor_count)| vk::DescriptorPoolSize { ty, descriptor_count: descriptor_count * frames })
+                .collect();
+            let descriptor_pool = if !pool_sizes_vec.is_empty() {
+                let info = vk::DescriptorPoolCreateInfo::builder()
+                    .max_sets((set_layouts.len() as u32) * frames)
+                    .pool_sizes(&pool_sizes_vec);
+                device.create_descriptor_pool(&info, None).map_err(|e| VkError::General(format!("create_descriptor_pool: {e}")))?
+            } else { vk::DescriptorPool::null() };
+            let descriptor_sets_per_frame: Vec<Vec<vk::DescriptorSet>> = if descriptor_pool != vk::DescriptorPool::null() && !set_layouts.is_empty() {
+                let mut v = Vec::with_capacity(views.len());
+                for _ in 0..views.len() {
+                    let alloc_info = vk::DescriptorSetAllocateInfo::builder().descriptor_pool(descriptor_pool).set_layouts(&set_layouts);
+                    let sets = device.allocate_descriptor_sets(&alloc_info).map_err(|e| VkError::General(format!("allocate_descriptor_sets: {e}")))?;
+                    v.push(sets);
+                }
+                v
+            } else { (0..views.len()).map(|_| Vec::new()).collect() };
+
+            // 9.2) Create demo resources for descriptors
+            // Uniform buffers: one per swapchain image (64 bytes), HOST_VISIBLE | HOST_COHERENT
+            let (uniform_buffers, uniform_memories) = if RB::bindings().iter().any(|b| matches!(b.kind, crate::resources::ResourceKind::Uniform)) {
+                let size = 64u64;
+                let mut bufs = Vec::with_capacity(views.len());
+                let mut mems = Vec::with_capacity(views.len());
+                for _ in 0..views.len() {
+                    let info = vk::BufferCreateInfo::builder().size(size).usage(vk::BufferUsageFlags::UNIFORM_BUFFER).sharing_mode(vk::SharingMode::EXCLUSIVE);
+                    let buffer = device.create_buffer(&info, None).map_err(|e| VkError::General(format!("create_buffer(uniform): {e}")))?;
+                    let req = device.get_buffer_memory_requirements(buffer);
+                    let mem_props = instance.get_physical_device_memory_properties(phys);
+                    let find_type = |type_bits: u32, flags: vk::MemoryPropertyFlags| -> Option<u32> {
+                        for i in 0..mem_props.memory_type_count { if (type_bits & (1 << i)) != 0 && mem_props.memory_types[i as usize].property_flags.contains(flags) { return Some(i); } }
+                        None
+                    };
+                    let idx = find_type(req.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT)
+                        .or_else(|| find_type(req.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE))
+                        .ok_or_else(|| VkError::General("no memory type for uniform buffer".into()))?;
+                    let alloc = vk::MemoryAllocateInfo::builder().allocation_size(req.size).memory_type_index(idx);
+                    let memory = device.allocate_memory(&alloc, None).map_err(|e| VkError::General(format!("allocate_memory(uniform): {e}")))?;
+                    device.bind_buffer_memory(buffer, memory, 0).map_err(|e| VkError::General(format!("bind_buffer_memory(uniform): {e}")))?;
+                    // Write provided uniform bytes or zeros
+                    if let Ok(ptr) = device.map_memory(memory, 0, size, vk::MemoryMapFlags::empty()) {
+                        let mut data = vec![0u8; size as usize];
+                        if let Some(AppResources { uniform_data: Some(bytes), .. }) = resources { let n = bytes.len().min(data.len()); data[..n].copy_from_slice(&bytes[..n]); }
+                        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+                        device.unmap_memory(memory);
+                    }
+                    bufs.push(buffer); mems.push(memory);
+                }
+                (bufs, mems)
+            } else { (Vec::new(), Vec::new()) };
+
+            // Demo image + sampler for texture/combined descriptors
+            let (demo_image, demo_image_memory, demo_image_view, demo_sampler, _img_width, _img_height) = if RB::bindings().iter().any(|b| matches!(b.kind, crate::resources::ResourceKind::Texture | crate::resources::ResourceKind::CombinedImageSampler)) || RB::bindings().iter().any(|b| matches!(b.kind, crate::resources::ResourceKind::Sampler)) {
+                let (w, h, pixels): (u32, u32, Vec<u8>) = if let Some(AppResources { image_size: Some((w,h)), image_pixels: Some(px), .. }) = resources {
+                    let expected = (*w as usize) * (*h as usize) * 4;
+                    if px.len() == expected { (*w, *h, px.clone()) } else { (1, 1, vec![255, 0, 255, 255]) }
+                } else if let Some(AppResources { image_rgba: Some(rgba), .. }) = resources { (1, 1, vec![rgba[0], rgba[1], rgba[2], rgba[3]]) } else { (1, 1, vec![255, 0, 255, 255]) };
+
+                let img_info = vk::ImageCreateInfo::builder()
+                    .image_type(vk::ImageType::TYPE_2D)
+                    .format(vk::Format::R8G8B8A8_UNORM)
+                    .extent(vk::Extent3D { width: w, height: h, depth: 1 })
+                    .mip_levels(1)
+                    .array_layers(1)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .tiling(vk::ImageTiling::OPTIMAL)
+                    .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                    .initial_layout(vk::ImageLayout::UNDEFINED);
+                let image = device.create_image(&img_info, None).map_err(|e| VkError::General(format!("create_image(tex): {e}")))?;
+                let req = device.get_image_memory_requirements(image);
+                let mem_props = instance.get_physical_device_memory_properties(phys);
+                let find_type = |type_bits: u32, flags: vk::MemoryPropertyFlags| -> Option<u32> {
+                    for i in 0..mem_props.memory_type_count { if (type_bits & (1 << i)) != 0 && mem_props.memory_types[i as usize].property_flags.contains(flags) { return Some(i); } }
+                    None
+                };
+                let idx = find_type(req.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+                    .or_else(|| find_type(req.memory_type_bits, vk::MemoryPropertyFlags::empty()))
+                    .ok_or_else(|| VkError::General("no memory type for image".into()))?;
+                let alloc = vk::MemoryAllocateInfo::builder().allocation_size(req.size).memory_type_index(idx);
+                let image_memory = device.allocate_memory(&alloc, None).map_err(|e| VkError::General(format!("allocate_memory(tex): {e}")))?;
+                device.bind_image_memory(image, image_memory, 0).map_err(|e| VkError::General(format!("bind_image_memory(tex): {e}")))?;
+
+                let sub = vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 };
+                let view_info = vk::ImageViewCreateInfo::builder().image(image).view_type(vk::ImageViewType::TYPE_2D).format(vk::Format::R8G8B8A8_UNORM).subresource_range(sub);
+                let image_view = device.create_image_view(&view_info, None).map_err(|e| VkError::General(format!("create_image_view(tex): {e}")))?;
+
+                let sampler_info = vk::SamplerCreateInfo::builder()
+                    .mag_filter(vk::Filter::NEAREST)
+                    .min_filter(vk::Filter::NEAREST)
+                    .address_mode_u(vk::SamplerAddressMode::REPEAT)
+                    .address_mode_v(vk::SamplerAddressMode::REPEAT)
+                    .address_mode_w(vk::SamplerAddressMode::REPEAT);
+                let sampler = device.create_sampler(&sampler_info, None).map_err(|e| VkError::General(format!("create_sampler: {e}")))?;
+
+                // Upload pixels via staging buffer and transition to SHADER_READ_ONLY_OPTIMAL
+                // Staging buffer
+                let staging_size = (w as u64) * (h as u64) * 4;
+                let staging_info = vk::BufferCreateInfo::builder().size(staging_size).usage(vk::BufferUsageFlags::TRANSFER_SRC).sharing_mode(vk::SharingMode::EXCLUSIVE);
+                let staging = device.create_buffer(&staging_info, None).map_err(|e| VkError::General(format!("create_buffer(staging): {e}")))?;
+                let sreq = device.get_buffer_memory_requirements(staging);
+                let sidx = find_type(sreq.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT)
+                    .ok_or_else(|| VkError::General("no memory type for staging".into()))?;
+                let salloc = vk::MemoryAllocateInfo::builder().allocation_size(sreq.size).memory_type_index(sidx);
+                let smem = device.allocate_memory(&salloc, None).map_err(|e| VkError::General(format!("allocate_memory(staging): {e}")))?;
+                device.bind_buffer_memory(staging, smem, 0).map_err(|e| VkError::General(format!("bind_buffer_memory(staging): {e}")))?;
+                if let Ok(ptr) = device.map_memory(smem, 0, staging_size, vk::MemoryMapFlags::empty()) {
+                    std::ptr::copy_nonoverlapping(pixels.as_ptr(), ptr as *mut u8, pixels.len());
+                    device.unmap_memory(smem);
+                }
+
+                // One-time command buffer for copy + transitions
+                // Use a transient command pool for upload
+                let upload_pool_info = vk::CommandPoolCreateInfo::builder().queue_family_index(qfi);
+                let upload_pool = device.create_command_pool(&upload_pool_info, None).map_err(|e| VkError::General(format!("create_command_pool(upload): {e}")))?;
+                let cmd_alloc = vk::CommandBufferAllocateInfo::builder().command_pool(upload_pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1);
+                let tmp_cmd = device.allocate_command_buffers(&cmd_alloc).map_err(|e| VkError::General(format!("allocate_command_buffers(temp): {e}")))?[0];
+                let begin = vk::CommandBufferBeginInfo::builder().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+                device.begin_command_buffer(tmp_cmd, &begin).map_err(|e| VkError::General(format!("begin_command_buffer(temp): {e}")))?;
+                // UNDEFINED -> TRANSFER_DST
+                let barrier_to_transfer = vk::ImageMemoryBarrier::builder()
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(image)
+                    .subresource_range(sub)
+                    .src_access_mask(vk::AccessFlags::empty())
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
+                device.cmd_pipeline_barrier(tmp_cmd, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], std::slice::from_ref(&barrier_to_transfer));
+                // Copy buffer -> image
+                let region = vk::BufferImageCopy::builder()
+                    .buffer_offset(0)
+                    .image_subresource(vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 })
+                    .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                    .image_extent(vk::Extent3D { width: w, height: h, depth: 1 });
+                device.cmd_copy_buffer_to_image(tmp_cmd, staging, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, std::slice::from_ref(&region));
+                // TRANSFER_DST -> SHADER_READ_ONLY
+                let barrier_to_shader = vk::ImageMemoryBarrier::builder()
+                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(image)
+                    .subresource_range(sub)
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ);
+                device.cmd_pipeline_barrier(tmp_cmd, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::DependencyFlags::empty(), &[], &[], std::slice::from_ref(&barrier_to_shader));
+                device.end_command_buffer(tmp_cmd).map_err(|e| VkError::General(format!("end_command_buffer(temp): {e}")))?;
+                let submit = vk::SubmitInfo::builder().command_buffers(std::slice::from_ref(&tmp_cmd));
+                device.queue_submit(queue, std::slice::from_ref(&submit), vk::Fence::null()).map_err(|e| VkError::General(format!("queue_submit(temp): {e}")))?;
+                device.queue_wait_idle(queue).ok();
+                device.free_command_buffers(upload_pool, &[tmp_cmd]);
+                device.destroy_command_pool(upload_pool, None);
+                device.destroy_buffer(staging, None);
+                device.free_memory(smem, None);
+
+                (image, image_memory, image_view, sampler, w, h)
+            } else {
+                (vk::Image::null(), vk::DeviceMemory::null(), vk::ImageView::null(), vk::Sampler::null(), 0, 0)
+            };
+
+            // 9.3) Write descriptors for each set/binding kind we support (uniform, texture, sampler, combined)
+            if !descriptor_sets_per_frame.is_empty() {
+                // Group writes per set
+                use std::collections::BTreeMap;
+                let mut by_set: BTreeMap<u32, Vec<&crate::resources::BindingDesc>> = BTreeMap::new();
+                for b in RB::bindings() { by_set.entry(b.set).or_default().push(b); }
+                for (frame_idx, frame_sets) in descriptor_sets_per_frame.iter().enumerate() {
+                    for (set_idx, binds) in by_set.iter() {
+                        if let Some(&dst_set) = frame_sets.get(*set_idx as usize) {
+                            let mut writes: Vec<vk::WriteDescriptorSet> = Vec::new();
+                            let mut buf_infos: Vec<vk::DescriptorBufferInfo> = Vec::new();
+                            let mut img_infos: Vec<vk::DescriptorImageInfo> = Vec::new();
+                            for b in binds.iter() {
+                                match b.kind {
+                                    crate::resources::ResourceKind::Uniform => {
+                                        if !uniform_buffers.is_empty() {
+                                            let ub = uniform_buffers[frame_idx.min(uniform_buffers.len()-1)];
+                                            buf_infos.push(vk::DescriptorBufferInfo { buffer: ub, offset: 0, range: 64 });
+                                            let info = buf_infos.last().unwrap();
+                                            writes.push(vk::WriteDescriptorSet::builder()
+                                                .dst_set(dst_set).dst_binding(b.binding).descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                                                .buffer_info(std::slice::from_ref(info)).build());
+                                        }
+                                    }
+                                crate::resources::ResourceKind::CombinedImageSampler => {
+                                    if demo_image_view != vk::ImageView::null() && demo_sampler != vk::Sampler::null() {
+                                        img_infos.push(vk::DescriptorImageInfo { sampler: demo_sampler, image_view: demo_image_view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL });
+                                        let info = img_infos.last().unwrap();
+                                        writes.push(vk::WriteDescriptorSet::builder()
+                                            .dst_set(dst_set).dst_binding(b.binding).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                                            .image_info(std::slice::from_ref(info)).build());
+                                    }
+                                }
+                                crate::resources::ResourceKind::Texture => {
+                                    if demo_image_view != vk::ImageView::null() {
+                                        img_infos.push(vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: demo_image_view, image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL });
+                                        let info = img_infos.last().unwrap();
+                                        writes.push(vk::WriteDescriptorSet::builder()
+                                            .dst_set(dst_set).dst_binding(b.binding).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                                            .image_info(std::slice::from_ref(info)).build());
+                                    }
+                                }
+                                crate::resources::ResourceKind::Sampler => {
+                                    if demo_sampler != vk::Sampler::null() {
+                                        img_infos.push(vk::DescriptorImageInfo { sampler: demo_sampler, image_view: vk::ImageView::null(), image_layout: vk::ImageLayout::UNDEFINED });
+                                        let info = img_infos.last().unwrap();
+                                        writes.push(vk::WriteDescriptorSet::builder()
+                                            .dst_set(dst_set).dst_binding(b.binding).descriptor_type(vk::DescriptorType::SAMPLER)
+                                            .image_info(std::slice::from_ref(info)).build());
+                                    }
+                                }
+                            }
+                            }
+                            if !writes.is_empty() { device.update_descriptor_sets(&writes, &[]); }
+                        }
+                    }
+                    let _ = frame_idx; // reserved for per-frame updates
+                }
+            }
+
+            // Use the first configured pipeline for initial bring-up.
+            let active_desc = cfg.pipelines.first().ok_or_else(|| VkError::General("no pipelines in EngineConfig".into()))?;
+            let pc_ranges = crate::vk_bridge::push_constant_ranges_from(active_desc);
+            let pll_info = vk::PipelineLayoutCreateInfo::builder()
+                .set_layouts(&set_layouts)
+                .push_constant_ranges(&pc_ranges);
+            let pipeline_layout = device
+                .create_pipeline_layout(&pll_info, None)
+                .map_err(|e| VkError::General(format!("create_pipeline_layout: {e}")))?;
+
+            // 10) Create graphics pipeline from configured PipelineDesc
+            // Helper: compile GLSL or load SPIR-V from file paths
+            #[cfg(feature = "vk-shaderc-compile")]
+            fn compile_glsl(stage: shaderc::ShaderKind, src: &str, name: &str) -> Result<Vec<u32>, VkError> {
+                let mut comp = shaderc::Compiler::new().ok_or_else(|| VkError::General("shaderc not available".into()))?;
+                let mut opts = shaderc::CompileOptions::new().ok_or_else(|| VkError::General("shaderc opts".into()))?;
+                opts.set_target_env(shaderc::TargetEnv::Vulkan, shaderc::EnvVersion::Vulkan1_2 as u32);
+                let bin = comp.compile_into_spirv(src, stage, name, "main", Some(&opts))
+                    .map_err(|e| VkError::General(format!("shaderc: {e}")))?;
+                Ok(bin.as_binary().to_vec())
+            }
+
+            fn load_shader_bytes(path: &str) -> Result<Vec<u8>, VkError> {
+                std::fs::read(path).map_err(|e| VkError::General(format!("read shader '{}': {e}", path)))
+            }
+            fn as_words(bytes: &[u8]) -> Result<Vec<u32>, VkError> {
+                if bytes.len() % 4 != 0 { return Err(VkError::General("SPIR-V length not multiple of 4".into())); }
+                let mut v = Vec::with_capacity(bytes.len() / 4);
+                let mut i = 0;
+                while i < bytes.len() { v.push(u32::from_le_bytes([bytes[i], bytes[i+1], bytes[i+2], bytes[i+3]])); i += 4; }
+                Ok(v)
+            }
+            #[cfg(feature = "vk-shaderc-compile")]
+            fn stage_from_ext(path: &str) -> Option<shaderc::ShaderKind> {
+                if path.ends_with(".vert") { return Some(shaderc::ShaderKind::Vertex); }
+                if path.ends_with(".frag") { return Some(shaderc::ShaderKind::Fragment); }
+                None
+            }
+            fn load_or_compile(path: &str) -> Result<Vec<u32>, VkError> {
+                if path.ends_with(".spv") {
+                    let bytes = load_shader_bytes(path)?; as_words(&bytes)
+                } else {
+                    #[cfg(feature = "vk-shaderc-compile")]
+                    {
+                        let stage = stage_from_ext(path).ok_or_else(|| VkError::General(format!("unknown shader stage for '{}': use .vert/.frag or .spv", path)))?;
+                        let src = std::fs::read_to_string(path).map_err(|e| VkError::General(format!("read shader '{}': {e}", path)))?;
+                        compile_glsl(stage, &src, path)
+                    }
+                    #[cfg(not(feature = "vk-shaderc-compile"))]
+                    { return Err(VkError::General("enable feature 'vk-shaderc-compile' or use .spv files".into())); }
+                }
+            }
+
+            // Load shader modules from PipelineDesc
+            let (vert_module, frag_module) = {
+                let vs_path = active_desc.shaders.vs;
+                let fs_path = active_desc.shaders.fs;
+                let vs = load_or_compile(vs_path)?;
+                let fs = load_or_compile(fs_path)?;
+                let vm = device.create_shader_module(&vk::ShaderModuleCreateInfo::builder().code(&vs), None)
+                    .map_err(|e| VkError::General(format!("create_shader_module: {e}")))?;
+                let fm = device.create_shader_module(&vk::ShaderModuleCreateInfo::builder().code(&fs), None)
+                    .map_err(|e| VkError::General(format!("create_shader_module: {e}")))?;
+                (vm, fm)
+            };
+
+            let entry_main = CString::new("main").unwrap();
+            let stage_vert = vk::PipelineShaderStageCreateInfo::builder()
+                .stage(vk::ShaderStageFlags::VERTEX)
+                .module(vert_module)
+                .name(&entry_main)
+                .build();
+            let stage_frag = vk::PipelineShaderStageCreateInfo::builder()
+                .stage(vk::ShaderStageFlags::FRAGMENT)
+                .module(frag_module)
+                .name(&entry_main)
+                .build();
+            let stages = [stage_vert, stage_frag];
+
+            // Vertex input from VL via bridge
+            let (binding_descs, attr_descs) = crate::vk_bridge::vertex_input_from::<VL>();
+            let vertex_input = vk::PipelineVertexInputStateCreateInfo::builder()
+                .vertex_binding_descriptions(&binding_descs)
+                .vertex_attribute_descriptions(&attr_descs);
+
+            // Map topology from PipelineDesc
+            let topo = match active_desc.topology {
+                crate::pipeline::Topology::TriangleList => vk::PrimitiveTopology::TRIANGLE_LIST,
+                crate::pipeline::Topology::LineList => vk::PrimitiveTopology::LINE_LIST,
+                crate::pipeline::Topology::PointList => vk::PrimitiveTopology::POINT_LIST,
+            };
+            let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::builder()
+                .topology(topo)
+                .primitive_restart_enable(false);
+
+            let viewport = vk::Viewport { x: 0.0, y: 0.0, width: extent.width as f32, height: extent.height as f32, min_depth: 0.0, max_depth: 1.0 };
+            let scissor = vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent };
+            let viewport_state = vk::PipelineViewportStateCreateInfo::builder()
+                .viewports(std::slice::from_ref(&viewport))
+                .scissors(std::slice::from_ref(&scissor));
+            let dyn_states = crate::vk_bridge::dynamic_states_from(active_desc);
+            let dynamic_state_ci;
+            let dynamic_state_ref = if dyn_states.is_empty() {
+                None
+            } else {
+                dynamic_state_ci = vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dyn_states);
+                Some(dynamic_state_ci)
+            };
+            let dyn_viewport = cfg.options.dynamic_viewport.unwrap_or_else(|| dyn_states.iter().any(|s| *s == vk::DynamicState::VIEWPORT));
+            let dyn_scissor = cfg.options.dynamic_scissor.unwrap_or_else(|| dyn_states.iter().any(|s| *s == vk::DynamicState::SCISSOR));
+
+            // Raster/blend/samples/depth: derive from PipelineDesc via bridge
+            let (poly, cull, ff) = crate::vk_bridge::raster_state_from(active_desc);
+            let raster = vk::PipelineRasterizationStateCreateInfo::builder()
+                .polygon_mode(poly)
+                .cull_mode(cull)
+                .front_face(ff)
+                .line_width(1.0);
+            let samples_flag = cfg.options.msaa_samples.map(samples_from_opt).unwrap_or_else(|| crate::vk_bridge::samples_from(active_desc));
+            let multisample = vk::PipelineMultisampleStateCreateInfo::builder()
+                .rasterization_samples(samples_flag);
+            let depth_stencil = crate::vk_bridge::depth_stencil_from(active_desc);
+            let color_blend_att = crate::vk_bridge::color_blend_attachment_from(active_desc);
+            let color_blend = vk::PipelineColorBlendStateCreateInfo::builder().attachments(std::slice::from_ref(&color_blend_att));
+
+            let mut pipeline_info = vk::GraphicsPipelineCreateInfo::builder()
+                .stages(&stages)
+                .vertex_input_state(&vertex_input)
+                .input_assembly_state(&input_assembly)
+                .viewport_state(&viewport_state)
+                .rasterization_state(&raster)
+                .multisample_state(&multisample)
+                .depth_stencil_state(&depth_stencil)
+                .color_blend_state(&color_blend)
+                .layout(pipeline_layout)
+                .render_pass(render_pass)
+                .subpass(0);
+            if let Some(ds) = dynamic_state_ref.as_ref() { pipeline_info = pipeline_info.dynamic_state(ds); }
+
+            let pipelines = device
+                .create_graphics_pipelines(vk::PipelineCache::null(), std::slice::from_ref(&pipeline_info), None)
+                .map_err(|e| VkError::General(format!("create_graphics_pipelines: {:?}", e)))?;
+            let pipeline = pipelines[0];
+
+            // Modules no longer needed after pipeline creation
+            device.destroy_shader_module(vert_module, None);
+            device.destroy_shader_module(frag_module, None);
+
+            // 11) Dummy vertex buffer (optional bind)
+            let (vertex_buffer, vertex_memory) = {
+                let vb0_stride = VL::vertex_buffers().first().map(|b| b.stride).unwrap_or(12);
+                let size = vb0_stride.max(12) as vk::DeviceSize * 3; // space for 3 vertices
+                let usage = vk::BufferUsageFlags::VERTEX_BUFFER;
+                let info = vk::BufferCreateInfo::builder().size(size).usage(usage).sharing_mode(vk::SharingMode::EXCLUSIVE);
+                let buffer = device.create_buffer(&info, None).map_err(|e| VkError::General(format!("create_buffer: {e}")))?;
+                let mem_req = device.get_buffer_memory_requirements(buffer);
+                let mem_props = instance.get_physical_device_memory_properties(phys);
+                let find_type = |type_bits: u32, flags: vk::MemoryPropertyFlags| -> Option<u32> {
+                    for i in 0..mem_props.memory_type_count { if (type_bits & (1 << i)) != 0 && mem_props.memory_types[i as usize].property_flags.contains(flags) { return Some(i); } }
+                    None
+                };
+                let mem_type = find_type(mem_req.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT)
+                    .or_else(|| find_type(mem_req.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE))
+                    .ok_or_else(|| VkError::General("no suitable memory type for vertex buffer".into()))?;
+                let alloc = vk::MemoryAllocateInfo::builder().allocation_size(mem_req.size).memory_type_index(mem_type);
+                let memory = device.allocate_memory(&alloc, None).map_err(|e| VkError::General(format!("allocate_memory: {e}")))?;
+                device.bind_buffer_memory(buffer, memory, 0).map_err(|e| VkError::General(format!("bind_buffer_memory: {e}")))?;
+                (buffer, memory)
+            };
+
+            // 12) Command pool + buffers
+            let pool_info = vk::CommandPoolCreateInfo::builder()
+                .queue_family_index(qfi)
+                .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+            let command_pool = device
+                .create_command_pool(&pool_info, None)
+                .map_err(|e| VkError::General(format!("create_command_pool: {e}")))?;
+            let alloc_info = vk::CommandBufferAllocateInfo::builder()
+                .command_pool(command_pool)
+                .level(vk::CommandBufferLevel::PRIMARY)
+                .command_buffer_count(views.len() as u32);
+            let command_buffers = device
+                .allocate_command_buffers(&alloc_info)
+                .map_err(|e| VkError::General(format!("allocate_command_buffers: {e}")))?;
+
+            for (i, &cb) in command_buffers.iter().enumerate() {
+                let begin = vk::CommandBufferBeginInfo::builder();
+                device.begin_command_buffer(cb, &begin).map_err(|e| VkError::General(format!("begin_command_buffer[{i}]: {e}")))?;
+                let clear_color = vk::ClearValue { color: vk::ClearColorValue { float32: [0.05, 0.05, 0.08, 1.0] } };
+                let clear_depth = vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } };
+                let clear_vals = [clear_color, clear_depth];
+                let rp_begin = vk::RenderPassBeginInfo::builder()
+                    .render_pass(render_pass)
+                    .framebuffer(framebuffers[i])
+                    .render_area(vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent })
+                    .clear_values(&clear_vals);
+                device.cmd_begin_render_pass(cb, &rp_begin, vk::SubpassContents::INLINE);
+                device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, pipeline);
+                // If dynamic viewport/scissor are enabled, set them here
+                if dyn_viewport {
+                    device.cmd_set_viewport(cb, 0, std::slice::from_ref(&vk::Viewport { x: 0.0, y: 0.0, width: extent.width as f32, height: extent.height as f32, min_depth: 0.0, max_depth: 1.0 }));
+                }
+                if dyn_scissor {
+                    device.cmd_set_scissor(cb, 0, std::slice::from_ref(&vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent }));
+                }
+                // Bind descriptor sets for this frame if available
+                let sets = &descriptor_sets_per_frame[i];
+                if !sets.is_empty() {
+                    device.cmd_bind_descriptor_sets(cb, vk::PipelineBindPoint::GRAPHICS, pipeline_layout, 0, sets, &[]);
+                }
+                // Bind dummy vertex buffer at binding 0 to match vertex input
+                device.cmd_bind_vertex_buffers(cb, 0, std::slice::from_ref(&vertex_buffer), &[0]);
+                device.cmd_draw(cb, 3, 1, 0, 0);
+                device.cmd_end_render_pass(cb);
+                device.end_command_buffer(cb).map_err(|e| VkError::General(format!("end_command_buffer[{i}]: {e}")))?;
+            }
+
+            // 13) Sync objects per frame
+            let mut image_available = Vec::with_capacity(images.len());
+            let mut render_finished = Vec::with_capacity(images.len());
+            let mut in_flight = Vec::with_capacity(images.len());
+            let semaphore_info = vk::SemaphoreCreateInfo::default();
+            let fence_info = vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED);
+            for _ in 0..images.len() {
+                image_available.push(device.create_semaphore(&semaphore_info, None).map_err(|e| VkError::General(format!("create_semaphore: {e}")))?);
+                render_finished.push(device.create_semaphore(&semaphore_info, None).map_err(|e| VkError::General(format!("create_semaphore: {e}")))?);
+                in_flight.push(device.create_fence(&fence_info, None).map_err(|e| VkError::General(format!("create_fence: {e}")))?);
+            }
+
+            Ok(Self {
+                _entry: entry,
+                instance,
+                surface_loader,
+                surface,
+                phys,
+                device,
+                queue,
+                queue_family_index: qfi,
+                swapchain_loader,
+                swapchain,
+                surface_format,
+                extent,
+                present_mode,
+                images,
+                views,
+                render_pass,
+                framebuffers,
+                depth_format,
+                depth_image,
+                depth_memory,
+                depth_view,
+                pipeline_layout,
+                pipeline,
+                set_layouts,
+                descriptor_pool,
+                descriptor_sets_per_frame,
+                uniform_buffers,
+                uniform_memories,
+                demo_sampler,
+                demo_image,
+                demo_image_memory,
+                demo_image_view,
+                dyn_viewport,
+                dyn_scissor,
+                command_pool,
+                command_buffers,
+                image_available,
+                render_finished,
+                in_flight,
+                vertex_buffer,
+                vertex_memory,
+            })
+        }
+    }
+}
+
+impl Drop for VkCore {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.device_wait_idle().ok();
+            if self.descriptor_pool != vk::DescriptorPool::null() {
+                self.device.destroy_descriptor_pool(self.descriptor_pool, None);
+            }
+            if self.demo_sampler != vk::Sampler::null() { self.device.destroy_sampler(self.demo_sampler, None); }
+            if self.demo_image_view != vk::ImageView::null() { self.device.destroy_image_view(self.demo_image_view, None); }
+            if self.demo_image != vk::Image::null() { self.device.destroy_image(self.demo_image, None); }
+            if self.demo_image_memory != vk::DeviceMemory::null() { self.device.free_memory(self.demo_image_memory, None); }
+            for &b in &self.uniform_buffers { if b != vk::Buffer::null() { self.device.destroy_buffer(b, None); } }
+            for &m in &self.uniform_memories { if m != vk::DeviceMemory::null() { self.device.free_memory(m, None); } }
+            for &f in &self.in_flight { self.device.destroy_fence(f, None); }
+            for &s in &self.image_available { self.device.destroy_semaphore(s, None); }
+            for &s in &self.render_finished { self.device.destroy_semaphore(s, None); }
+            if self.vertex_buffer != vk::Buffer::null() { self.device.destroy_buffer(self.vertex_buffer, None); }
+            if self.vertex_memory != vk::DeviceMemory::null() { self.device.free_memory(self.vertex_memory, None); }
+            if self.pipeline != vk::Pipeline::null() { self.device.destroy_pipeline(self.pipeline, None); }
+            if self.command_pool != vk::CommandPool::null() { self.device.destroy_command_pool(self.command_pool, None); }
+            for &fb in &self.framebuffers { self.device.destroy_framebuffer(fb, None); }
+            self.device.destroy_render_pass(self.render_pass, None);
+            if self.depth_view != vk::ImageView::null() { self.device.destroy_image_view(self.depth_view, None); }
+            if self.depth_image != vk::Image::null() { self.device.destroy_image(self.depth_image, None); }
+            if self.depth_memory != vk::DeviceMemory::null() { self.device.free_memory(self.depth_memory, None); }
+            self.device.destroy_pipeline_layout(self.pipeline_layout, None);
+            for &sl in &self.set_layouts { self.device.destroy_descriptor_set_layout(sl, None); }
+            for &iv in &self.views { self.device.destroy_image_view(iv, None); }
+            self.swapchain_loader.destroy_swapchain(self.swapchain, None);
+            self.device.destroy_device(None);
+            self.surface_loader.destroy_surface(self.surface, None);
+            self.instance.destroy_instance(None);
+        }
+    }
+}
+
+/// Run a minimal Linux Vulkan application: create window, init Vulkan core, poll events.
+/// Rendering is not implemented yet; this proves out platform + device initialization.
+pub fn run_vulkan_linux_app_with<RB, VL>(cfg: &EngineConfig) -> Result<(), VkError>
+where
+    RB: ResourceBindings,
+    VL: VertexLayout,
+{
+    use winit::event::{Event, WindowEvent};
+    use winit::event_loop::EventLoop;
+    use winit::window::WindowBuilder;
+
+    let event_loop = EventLoop::new();
+    let window = WindowBuilder::new()
+        .with_title(cfg.app)
+        .with_inner_size(winit::dpi::LogicalSize::new(cfg.window.width as f64, cfg.window.height as f64))
+        .build(&event_loop)
+        .map_err(|e| VkError::General(format!("create window: {e}")))?;
+
+    println!("[vk-linux] window created: {}x{}, vsync={}", cfg.window.width, cfg.window.height, cfg.window.vsync);
+
+    // Vulkan core init with pipeline state from cfg
+    let mut vk = VkCore::new_with::<RB, VL>(&window, cfg, None)?;
+    println!(
+        "[vk-linux] Vulkan initialized: format={}, extent={}x{}, images={}",
+        vk.surface_format.format.as_raw(), vk.extent.width, vk.extent.height, vk.images.len()
+    );
+
+    // Stub pipeline mapping: iterate configured pipelines and log intended Vk topology
+    use crate::pipeline::Topology as MkTopology;
+    let map_topology = |t: &MkTopology| match t {
+        MkTopology::TriangleList => (vk::PrimitiveTopology::TRIANGLE_LIST, "TRIANGLE_LIST"),
+        MkTopology::LineList => (vk::PrimitiveTopology::LINE_LIST, "LINE_LIST"),
+        MkTopology::PointList => (vk::PrimitiveTopology::POINT_LIST, "POINT_LIST"),
+    };
+    for p in &cfg.pipelines {
+        let (topo, topo_name) = map_topology(&p.topology);
+        println!(
+            "[vk-linux] stub pipeline: name='{}' vs='{}' fs='{}' topo={} depth={}",
+            p.name, p.shaders.vs, p.shaders.fs, topo_name, p.depth
+        );
+        // Future: create shader modules from SPIR-V, pipeline state, and vkCmdDraw.
+        // For now we only ensure a pipeline layout exists.
+    }
+
+    let mut frame: usize = 0;
+    event_loop.run(move |event, _, control_flow| {
+        use winit::event_loop::ControlFlow;
+        *control_flow = ControlFlow::Wait;
+        match event {
+            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
+                println!("[vk-linux] close requested");
+                *control_flow = ControlFlow::Exit;
+            }
+            Event::WindowEvent { event: WindowEvent::Resized(size), .. } => {
+                println!("[vk-linux] resized: {}x{}", size.width, size.height);
+            }
+            Event::MainEventsCleared => {
+                // Acquire, submit recorded CB, present
+                let i = frame % vk.images.len();
+                unsafe {
+                    let fence = vk.in_flight[i];
+                    let image_avail = vk.image_available[i];
+                    let render_fin = vk.render_finished[i];
+                    let _ = vk.device.wait_for_fences(&[fence], true, u64::MAX);
+                    let _ = vk.device.reset_fences(&[fence]);
+                    let image_index = match vk.swapchain_loader.acquire_next_image(vk.swapchain, u64::MAX, image_avail, vk::Fence::null()) {
+                        Ok((idx, _)) => idx as usize,
+                        Err(_e) => { return; }
+                    };
+                    let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+                    let submit_info = vk::SubmitInfo::builder()
+                        .wait_semaphores(std::slice::from_ref(&image_avail))
+                        .wait_dst_stage_mask(&wait_stages)
+                        .command_buffers(std::slice::from_ref(&vk.command_buffers[image_index]))
+                        .signal_semaphores(std::slice::from_ref(&render_fin));
+                    let _ = vk.device.queue_submit(vk.queue, std::slice::from_ref(&submit_info), fence);
+
+                    let indices = [image_index as u32];
+                    let present_info = vk::PresentInfoKHR::builder()
+                        .wait_semaphores(std::slice::from_ref(&render_fin))
+                        .swapchains(std::slice::from_ref(&vk.swapchain))
+                        .image_indices(&indices);
+                    let _ = vk.swapchain_loader.queue_present(vk.queue, &present_info);
+                }
+                frame = frame.wrapping_add(1);
+            }
+            _ => {}
+        }
+    });
+}
+
+/// Backward-compatible entry that uses empty layouts and a trivial vertex config.
+/// Prefer `run_vulkan_linux_app_with<RB, VL>` for derived resource/vertex integration.
+pub fn run_vulkan_linux_app(cfg: &EngineConfig) -> Result<(), VkError> {
+    // Use a no-binding RB/VL adapter so code paths stay unified.
+    struct NoRB; impl ResourceBindings for NoRB { fn bindings() -> &'static [crate::resources::BindingDesc] { &[] } }
+    struct NoVL; impl VertexLayout for NoVL {
+        fn vertex_attrs() -> &'static [crate::resources::VertexAttr] { &[] }
+        fn vertex_buffers() -> &'static [crate::resources::VertexBufferDesc] {
+            static BUFS: [crate::resources::VertexBufferDesc; 1] = [crate::resources::VertexBufferDesc { binding: 0, stride: 0, step: StepMode::Vertex }];
+            &BUFS
+        }
+    }
+    run_vulkan_linux_app_with::<NoRB, NoVL>(cfg)
+}
+
+/// New entry with optional app-supplied demo resources.
+pub fn run_vulkan_linux_app_with_resources<RB, VL>(cfg: &EngineConfig, resources: &AppResources) -> Result<(), VkError>
+where
+    RB: ResourceBindings,
+    VL: VertexLayout,
+{
+    use winit::event::{Event, WindowEvent};
+    use winit::event_loop::EventLoop;
+    use winit::window::WindowBuilder;
+
+    let event_loop = EventLoop::new();
+    let window = WindowBuilder::new()
+        .with_title(cfg.app)
+        .with_inner_size(winit::dpi::LogicalSize::new(cfg.window.width as f64, cfg.window.height as f64))
+        .build(&event_loop)
+        .map_err(|e| VkError::General(format!("create window: {e}")))?;
+
+    let mut vk = VkCore::new_with::<RB, VL>(&window, cfg, Some(resources))?;
+
+    use crate::pipeline::Topology as MkTopology;
+    for p in &cfg.pipelines {
+        let topo_name = match p.topology { MkTopology::TriangleList => "TRIANGLE_LIST", MkTopology::LineList => "LINE_LIST", MkTopology::PointList => "POINT_LIST" };
+        println!("[vk-linux] pipeline: '{}' topo={}", p.name, topo_name);
+    }
+
+    let mut frame: usize = 0;
+    event_loop.run(move |event, _, control_flow| {
+        use winit::event_loop::ControlFlow;
+        *control_flow = ControlFlow::Wait;
+        match event {
+            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => { *control_flow = ControlFlow::Exit; }
+            Event::MainEventsCleared => {
+                let i = frame % vk.images.len();
+                unsafe {
+                    let fence = vk.in_flight[i];
+                    let image_avail = vk.image_available[i];
+                    let render_fin = vk.render_finished[i];
+                    let _ = vk.device.wait_for_fences(&[fence], true, u64::MAX);
+                    let _ = vk.device.reset_fences(&[fence]);
+                    let image_index = match vk.swapchain_loader.acquire_next_image(vk.swapchain, u64::MAX, image_avail, vk::Fence::null()) { Ok((idx, _)) => idx as usize, Err(_)=> { return; } };
+                    let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+                    let submit_info = vk::SubmitInfo::builder()
+                        .wait_semaphores(std::slice::from_ref(&image_avail))
+                        .wait_dst_stage_mask(&wait_stages)
+                        .command_buffers(std::slice::from_ref(&vk.command_buffers[image_index]))
+                        .signal_semaphores(std::slice::from_ref(&render_fin));
+                    let _ = vk.device.queue_submit(vk.queue, std::slice::from_ref(&submit_info), fence);
+                    let indices = [image_index as u32];
+                    let present_info = vk::PresentInfoKHR::builder().wait_semaphores(std::slice::from_ref(&render_fin)).swapchains(std::slice::from_ref(&vk.swapchain)).image_indices(&indices);
+                    let _ = vk.swapchain_loader.queue_present(vk.queue, &present_info);
+                }
+                frame = frame.wrapping_add(1);
+            }
+            _ => {}
+        }
+    });
+}
+
+/// Entry with resources and a per-frame uniform update callback.
+pub fn run_vulkan_linux_app_with_resources_and_update<RB, VL, F>(cfg: &EngineConfig, resources: &AppResources, mut update: F) -> Result<(), VkError>
+where
+    RB: ResourceBindings,
+    VL: VertexLayout,
+    F: 'static + FnMut(usize) -> Option<Vec<u8>>,
+{
+    use winit::event::{Event, WindowEvent};
+    use winit::event_loop::EventLoop;
+    use winit::window::WindowBuilder;
+
+    let event_loop = EventLoop::new();
+    let window = WindowBuilder::new()
+        .with_title(cfg.app)
+        .with_inner_size(winit::dpi::LogicalSize::new(cfg.window.width as f64, cfg.window.height as f64))
+        .build(&event_loop)
+        .map_err(|e| VkError::General(format!("create window: {e}")))?;
+
+    let mut vk = VkCore::new_with::<RB, VL>(&window, cfg, Some(resources))?;
+
+    let mut frame: usize = 0;
+    event_loop.run(move |event, _, control_flow| {
+        use winit::event_loop::ControlFlow;
+        *control_flow = ControlFlow::Wait;
+        match event {
+            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => { *control_flow = ControlFlow::Exit; }
+            Event::MainEventsCleared => {
+                let i = frame % vk.images.len();
+                unsafe {
+                    let fence = vk.in_flight[i];
+                    let image_avail = vk.image_available[i];
+                    let render_fin = vk.render_finished[i];
+                    let _ = vk.device.wait_for_fences(&[fence], true, u64::MAX);
+                    let _ = vk.device.reset_fences(&[fence]);
+                    let image_index = match vk.swapchain_loader.acquire_next_image(vk.swapchain, u64::MAX, image_avail, vk::Fence::null()) { Ok((idx, _)) => idx as usize, Err(_)=> { return; } };
+
+                    // Per-frame uniform update
+                    if let Some(bytes) = update(image_index) {
+                        if let Some(&mem) = vk.uniform_memories.get(image_index) {
+                            let size = 64u64;
+                            if let Ok(ptr) = vk.device.map_memory(mem, 0, size, vk::MemoryMapFlags::empty()) {
+                                let n = bytes.len().min(size as usize);
+                                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, n);
+                                if n < size as usize {
+                                    // zero the rest
+                                    std::ptr::write_bytes((ptr as *mut u8).add(n), 0u8, (size as usize) - n);
+                                }
+                                vk.device.unmap_memory(mem);
+                            }
+                        }
+                    }
+
+                    let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+                    let submit_info = vk::SubmitInfo::builder()
+                        .wait_semaphores(std::slice::from_ref(&image_avail))
+                        .wait_dst_stage_mask(&wait_stages)
+                        .command_buffers(std::slice::from_ref(&vk.command_buffers[image_index]))
+                        .signal_semaphores(std::slice::from_ref(&render_fin));
+                    let _ = vk.device.queue_submit(vk.queue, std::slice::from_ref(&submit_info), fence);
+                    let indices = [image_index as u32];
+                    let present_info = vk::PresentInfoKHR::builder().wait_semaphores(std::slice::from_ref(&render_fin)).swapchains(std::slice::from_ref(&vk.swapchain)).image_indices(&indices);
+                    let _ = vk.swapchain_loader.queue_present(vk.queue, &present_info);
+                }
+                frame = frame.wrapping_add(1);
+            }
+            _ => {}
+        }
+    });
+}

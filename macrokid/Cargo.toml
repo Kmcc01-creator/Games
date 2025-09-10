@@ -6,6 +6,7 @@ members = [
     "example",
     "macrokid_graphics",
     "macrokid_graphics_derive",
+    "macrokid_graphics_proto",
     "macrokid_clang_exec",
     "examples/graphics_demo",
     "examples/custom_derive",

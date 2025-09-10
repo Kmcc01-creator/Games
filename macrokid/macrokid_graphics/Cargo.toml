@@ -5,6 +5,42 @@ edition = "2021"
 
 [dependencies]
 macrokid_core = { path = "../macrokid_core" }
+macrokid_graphics_proto = { path = "../macrokid_graphics_proto", optional = true }
+
+[features]
+default = []
+# Linux-facing Vulkan backend scaffold using ash + winit
+vulkan-linux = [
+    "dep:ash",
+    "dep:winit",
+    "dep:raw-window-handle",
+    "dep:ash-window",
+]
+vk-shaderc-compile = ["dep:shaderc"]
+proto = ["dep:macrokid_graphics_proto"]
+
+[dependencies.ash]
+version = "0.37"
+optional = true
+default-features = false
+# Link to system Vulkan loader; adjust if needed per environment
+features = ["linked"]
+
+[dependencies.ash-window]
+version = "0.12"
+optional = true
+
+[dependencies.winit]
+version = "0.28"
+optional = true
+
+[dependencies.raw-window-handle]
+version = "0.5"
+optional = true
+
+[dependencies.shaderc]
+version = "0.8"
+optional = true
 
 [dev-dependencies]
 macrokid_graphics_derive = { path = "../macrokid_graphics_derive" }

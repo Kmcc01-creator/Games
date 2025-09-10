@@ -1,3 +1,9 @@
 pub mod resources;
 pub mod pipeline;
 pub mod engine;
+#[cfg(feature = "vulkan-linux")]
+pub mod vk_linux;
+#[cfg(feature = "vulkan-linux")]
+pub mod vk_bridge;
+#[cfg(feature = "proto")]
+pub mod proto;

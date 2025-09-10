@@ -23,6 +23,7 @@ macrokid/
 └── example/               # Usage demonstrations
 macrokid_graphics/         # Experimental graphics runtime
 macrokid_graphics_derive/  # Experimental graphics derives (resources, buffers, pipelines)
+macrokid_graphics_proto/   # Protobuf schema + prost build for data-first configs
 macrokid_clang_exec/       # Exec-based Clang PoC for C/C++ headers
 examples/graphics_demo/    # Demo using graphics derives + Clang PoC build script
 ```
@@ -53,6 +54,29 @@ fn process_data() -> Result<(), &'static str> {
     Ok(())
 }
 ```
+
+### Getting Started: Graphics
+
+- Overview: See `MACROKID_GRAPHICS.md` for architecture, derives, Vulkan notes, and examples.
+- Derive-first (code-defined) path:
+  - Define resources with `#[derive(ResourceBinding)]`, vertices with `#[derive(BufferLayout)]`, and pipelines with `#[derive(GraphicsPipeline)]`.
+  - Run the Linux Vulkan example (feature-gated):
+    - `cargo run -p macrokid_graphics --example linux_vulkan --features vulkan-linux,vk-shaderc-compile`
+  - Animated demo (per-frame uniform updates + custom texture):
+    - `cargo run -p macrokid_graphics --example animated_demo --features vulkan-linux,vk-shaderc-compile`
+  - The Vulkan backend reflects your derives into descriptor set layouts, vertex input, and pipeline state.
+- Proto-first (data-defined) path:
+  - Define `EngineConfig` in protobuf using `macrokid_graphics_proto/proto/graphics_config.proto`.
+  - Run the loader example (feature-gated):
+    - `cargo run -p macrokid_graphics --example load_proto --features vulkan-linux,proto,vk-shaderc-compile -- <path.pb>`
+  - The loader converts protobuf to runtime types and runs the same Vulkan path.
+
+### New Derive: RenderEngine
+
+- `#[derive(RenderEngine)]` on a struct creates an EngineConfig from:
+  - `#[app(name = "...")]`, `#[window(width = W, height = H, vsync = bool)]`
+  - Fields annotated `#[use_pipeline]` pointing to types that implement `PipelineInfo`
+  - Emits `impl RenderEngineInfo` with `fn engine_config() -> EngineConfig` for ergonomic bootstrapping.
 
 ### Building Custom Macros
 
@@ -133,8 +157,16 @@ Demonstrates advanced framework usage:
 We’re actively exploring graphics-focused DSLs and cross-language tooling:
 
 - `macrokid_graphics` + `macrokid_graphics_derive`: ResourceBinding, BufferLayout, GraphicsPipeline derives.
+- `macrokid_graphics_proto`: Protobuf schema + prost-generated types for parallel, data-first graphics configs.
 - `macrokid_clang_exec`: Exec-based Clang integration to analyze/generate from C/C++ headers.
 - `examples/graphics_demo`: Shows derives in action and emits C/C++ IR when `CLANG_EXEC_DEMO=1`.
+
+Quick links and commands:
+- Graphics overview and Vulkan docs: see `MACROKID_GRAPHICS.md`.
+- Linux Vulkan example (feature-gated):
+  - `cargo run -p macrokid_graphics --example linux_vulkan --features vulkan-linux,vk-shaderc-compile`
+- Protobuf loader example (data-first path):
+  - `cargo run -p macrokid_graphics --example load_proto --features vulkan-linux,proto,vk-shaderc-compile -- <path.pb>`
 
 See `EXPERIMENTS.md` for current status, usage, and roadmap. These APIs are experimental and may change.
 

@@ -1,0 +1,21 @@
+[package]
+name = "macrokid_graphics_proto"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "macrokid_graphics_proto"
+path = "src/lib.rs"
+
+[dependencies]
+prost = "0.13"
+
+[build-dependencies]
+prost-build = "0.13"
+prost-types = "0.13"
+tonic-build = { version = "0.12", optional = true }
+protoc-bin-vendored = "3"
+
+[features]
+default = []
+tonic = ["dep:tonic-build"]

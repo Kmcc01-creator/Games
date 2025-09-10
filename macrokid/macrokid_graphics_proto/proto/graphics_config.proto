@@ -1,0 +1,72 @@
+syntax = "proto3";
+package macrokid.graphics.v1;
+
+message WindowCfg {
+  uint32 width = 1;
+  uint32 height = 2;
+  bool vsync = 3;
+}
+
+message ShaderPaths {
+  oneof vs {
+    string vs_path = 1;
+    bytes vs_spirv = 2;
+  }
+  oneof fs {
+    string fs_path = 3;
+    bytes fs_spirv = 4;
+  }
+}
+
+enum Topology {
+  TOPO_UNSPEC = 0;
+  TRIANGLE_LIST = 1;
+  LINE_LIST = 2;
+  POINT_LIST = 3;
+}
+
+message RasterState {
+  enum PolygonMode { POLY_UNSPEC = 0; FILL = 1; LINE = 2; }
+  enum CullMode { CULL_UNSPEC = 0; NONE = 1; FRONT = 2; BACK = 3; }
+  enum FrontFace { FF_UNSPEC = 0; CW = 1; CCW = 2; }
+  PolygonMode polygon = 1;
+  CullMode cull = 2;
+  FrontFace front_face = 3;
+}
+
+message ColorBlendState {
+  bool enable = 1;
+}
+
+message PipelineDesc {
+  string name = 1;
+  ShaderPaths shaders = 2;
+  Topology topology = 3;
+  bool depth = 4;
+  RasterState raster = 5; // optional by presence
+  ColorBlendState blend = 6; // optional by presence
+  uint32 samples = 7; // 0 means unspecified
+}
+
+message EngineConfig {
+  string app = 1;
+  WindowCfg window = 2;
+  repeated PipelineDesc pipelines = 3;
+}
+
+// Optional authorable resource/vertex layouts (future use)
+message ResourceBindingSet { repeated Binding bindings = 1; }
+message Binding {
+  uint32 set = 1;
+  uint32 binding = 2;
+  enum BindingKind { BIND_UNSPEC = 0; UNIFORM = 1; TEXTURE = 2; SAMPLER = 3; COMBINED_IMAGE_SAMPLER = 4; }
+  BindingKind kind = 3;
+}
+
+message VertexLayout {
+  VertexBuffer buffer = 1;
+  repeated VertexAttr attrs = 2;
+}
+message VertexBuffer { uint32 stride = 1; enum StepMode { STEP_UNSPEC = 0; VERTEX = 1; INSTANCE = 2; } StepMode step = 2; }
+message VertexAttr { string field = 1; uint32 location = 2; string format = 3; uint32 offset = 4; uint32 size = 5; }
+
