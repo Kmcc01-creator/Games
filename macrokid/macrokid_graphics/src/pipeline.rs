@@ -4,6 +4,17 @@ pub enum Topology { TriangleList, LineList, PointList }
 #[derive(Clone, Debug)]
 pub struct ShaderPaths { pub vs: &'static str, pub fs: &'static str }
 
+// Render target descriptions for flexible attachment configuration
+#[derive(Clone, Debug)]
+pub struct ColorTargetDesc {
+    pub format: &'static str,
+    /// Optional per-target blend enable (falls back to pipeline-level blend if None)
+    pub blend: Option<bool>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DepthTargetDesc { pub format: &'static str }
+
 #[derive(Clone, Debug)]
 pub struct PipelineDesc {
     pub name: &'static str,
@@ -17,6 +28,10 @@ pub struct PipelineDesc {
     pub depth_stencil: Option<DepthState>,
     pub dynamic: Option<DynamicStateDesc>,
     pub push_constants: Option<PushConstantRange>,
+    /// Optional list of color targets (MRT). If None or empty, defaults to single swapchain target.
+    pub color_targets: Option<&'static [ColorTargetDesc]>,
+    /// Optional depth target format (backend picks suitable default if None)
+    pub depth_target: Option<DepthTargetDesc>,
 }
 
 pub trait PipelineInfo { fn pipeline_desc() -> &'static PipelineDesc; }

@@ -1,0 +1,8 @@
+[package]
+name = "macrokid_graphics_lighting"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+macrokid_graphics = { path = "../macrokid_graphics" }
+

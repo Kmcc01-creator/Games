@@ -198,6 +198,90 @@ Current project state:
 - Vulkan Linux path honors these options with safe fallbacks.
 - Examples `animated_demo` and `render_engine` demonstrate env+override and log effective settings.
 
+## Render Graph Progress (MRT + Pass Derives)
+
+We are landing a staged Render Graph with derive-driven authoring, MRT, and Vulkan execution. The current milestone focuses on resource planning and synchronization, keeping final display as a blit while we wire per-pass execution.
+
+What’s implemented:
+- Format helpers: `parse_color_format` and `parse_depth_format` map friendly strings (e.g., `rgba16f`, `D32_SFLOAT`) to Vulkan formats. Vertex format mapping extended accordingly.
+- Attachment-aware pipelines: `PipelineDesc` now supports `color_targets: Option<&'static [ColorTargetDesc]>` and `depth_target: Option<DepthTargetDesc>`.
+- Derives:
+  - `#[derive(GraphicsPipeline)]` parses `#[color_target(..)]` and `#[depth_target(..)]` for MRT.
+  - `#[derive(RenderPass)]` parses rich `#[output(name, format, size, usage, samples)]` plus legacy `#[color_target]` / `#[depth_target]`, and `#[input(name)]`.
+- Resource planning (`render_graph`):
+  - `plan_resources` / `plan_resources_from_passes` flatten pass outputs into `ResourcePlan`s (format, size, usage, samples) and per-pass binding plans.
+  - `compute_actual_size` resolves `SizeSpec` against the swapchain.
+- Vulkan path (Linux):
+  - MRT attachments allocated offscreen per target and per frame; render pass uses all color + depth attachments; final blit from attachment 0 to the swapchain.
+  - Graph entrypoint `run_vulkan_linux_app_with_graph` maps the first pass’ outputs into a synthetic pipeline and executes using the MRT path.
+
+## Lighting System Progress
+
+We started a lighting-focused extension built on the existing derive and render graph architecture.
+
+What’s implemented:
+- New crates:
+  - `macrokid_graphics_lighting`: lighting traits, default shader snippets, and helpers.
+  - `macrokid_graphics_lighting_derive`: `#[derive(LightingModel)]` and `#[derive(LightSetup)]`.
+- LightingModel derive:
+  - Emits a model-specific `ResourceBindings` type (e.g., `PhongModelBindings`) with:
+    - set=0,binding=0 → Uniform (vs|fs) for MVP + light params
+    - set=0,binding=1 → CombinedImageSampler (fs) for albedo
+  - Provides in-memory GLSL shader sources for a forward Phong pass.
+- Inline GLSL support in Vulkan (Linux) backend:
+  - Pipeline shaders can be inlined via prefixes: `inline.vert:...` and `inline.frag:...` (requires `vk-shaderc-compile`).
+- Variable-size UBO support:
+  - The Vulkan path now sizes per-frame uniform buffers from `AppResources.uniform_data` (falls back to 64 bytes), and uses this size for descriptor ranges and per-frame updates.
+- Convenience helpers:
+  - `lighting::forward_pipeline_desc_for::<Model>(name)` → synthesizes a `PipelineDesc` for a forward pass using the model’s in-memory shaders and default pipeline state.
+  - `lighting::HasBindings` trait implemented by the derive; use `lighting::forward_pipeline_and_rb::<Model>(name)` to get both the `PipelineDesc` and the RB type via `PhantomData<Model::RB>`.
+- LightSetup derive:
+  - `#[derive(LightSetup)]` generates a scene UBO binding (set=1,binding=0) and a `shadow_pass()` that returns a `PassDesc` with a named depth output (`shadow_depth`) and usage `DEPTH|SAMPLED`.
+- Example:
+  - `examples/lighting_forward_phong.rs` — builds a pipeline from inline GLSL, supplies a 96‑byte UBO (mat4 + light dir + light color) and a 1×1 albedo texture, runs with the derived bindings.
+
+How to run (Linux Vulkan):
+- `cargo run -p macrokid_graphics --example lighting_forward_phong --features vulkan-linux,vk-shaderc-compile`
+
+Inline GLSL prefixes:
+- `inline.vert:...` and `inline.frag:...` compile provided GLSL strings at runtime when `vk-shaderc-compile` is enabled.
+- Generic `inline:` or `source:` prefixes are also accepted; stage is guessed.
+
+## Updated Roadmap
+
+Short-term goals:
+- Render Graph execution
+  - Full multi-pass executor in Vulkan: per-pass allocations, framebuffers, inter-pass barriers, record all passes, final present/tonemap.
+  - Map `RenderPass` nodes to their intended `PipelineDesc`s via a `RenderGraphBuilder`.
+- Lighting framework
+  - Typed UBO helpers (safe struct→bytes) for MVP + light params and per-frame updates.
+  - Expand `LightingModel` derives for Blinn-Phong and PBR variants (material masks, normal maps).
+  - `LightSetup` to generate shadow pipeline descriptors and (later) light culling layouts.
+  - Add a shadowed Phong example, and a deferred G‑Buffer + lighting example once multi-pass is wired.
+
+Medium-term goals:
+- Better `#[output]` parsing in derives for size/usage (done) and validation (limits, aliases).
+- Descriptor management APIs beyond demo resources; texture uploads and samplers per material.
+- Backend portability: adapt shader templates or introduce a cross-backend shading layer.
+
+Long-term goals:
+- Allocator with transient aliasing based on `UsageMask` and pass lifetimes.
+- Barrier planner (pre/post pass, inter-pass) with validation.
+- Additional backends (D3D12 or wgpu) using the same derives and descriptors.
+
+How to try it:
+- Example `examples/deferred_gbuffer.rs` demonstrates a render pass with three color targets + depth using `#[color_target]` and `#[depth_target]`, executed via the graph entry.
+
+Next steps (in progress):
+- Allocator + per-pass framebuffers across all passes from `ResourcePlan`.
+- Barrier planner: pre-/post-pass layout transitions (shader-read vs attachment) and inter-pass ordering.
+- Command recording: record all passes per frame; final blit remains until a tonemap-present pass is wired.
+- Pair `RenderPass` nodes with their intended `PipelineDesc` via a `RenderGraphBuilder` and execute multiple passes.
+
+Notes:
+- `#[output]` currently defaults size to `rel(1.0,1.0)` and maps usage to COLOR or DEPTH at derive time for portability in statics. Full parsing of `usage = "color|sampled"` and `size = "rel(0.5,0.5)"` will be applied in the allocator when consuming `OutputDesc`.
+- The Vulkan MRT path transitions the first color target to `TRANSFER_SRC_OPTIMAL` for blit, transitions the swapchain image to `TRANSFER_DST_OPTIMAL`, then to `PRESENT_SRC_KHR`.
+
   - Optionally `validate_config()` for structural checks (non-empty, no duplicates, shader paths present).
   - Validate pipelines against derives using either:
     - `engine.validate_pipelines_with::<RB, VL>(&cfg)` or

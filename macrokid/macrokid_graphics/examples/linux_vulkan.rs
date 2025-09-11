@@ -19,6 +19,8 @@ fn main() {
         depth_stencil: None,
         dynamic: None,
         push_constants: None,
+        color_targets: None,
+        depth_target: None,
     };
 
     let cfg = EngineBuilder::new()

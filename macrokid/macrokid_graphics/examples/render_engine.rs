@@ -21,7 +21,7 @@ struct Vertex {
 }
 
 #[derive(GraphicsPipeline)]
-#[pipeline(vs = concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/triangle.vert"), fs = concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/triangle.frag"), topology = "TriangleList", depth = true, polygon = "Fill", cull = "Back", front_face = "Cw")]
+#[pipeline(vs = "shaders/triangle.vert", fs = "shaders/triangle.frag", topology = "TriangleList", depth = true, polygon = "Fill", cull = "Back", front_face = "Cw")]
 struct TrianglePipeline;
 
 #[derive(RenderEngine)]

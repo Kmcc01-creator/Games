@@ -300,7 +300,7 @@ mod tests {
         let cfg = EngineBuilder::new()
             .app("Demo")
             .window(800, 600, true)
-            .add_pipeline(PipelineDesc { name: "triangle", shaders: ShaderPaths { vs: "vs", fs: "fs" }, topology: Topology::TriangleList, depth: true, raster: None, blend: None, samples: None, depth_stencil: None, dynamic: None, push_constants: None })
+            .add_pipeline(PipelineDesc { name: "triangle", shaders: ShaderPaths { vs: "vs", fs: "fs" }, topology: Topology::TriangleList, depth: true, raster: None, blend: None, samples: None, depth_stencil: None, dynamic: None, push_constants: None, color_targets: None, depth_target: None })
             .build()
             .expect("valid");
         assert_eq!(cfg.window.width, 800);

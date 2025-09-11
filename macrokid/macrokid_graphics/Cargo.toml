@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 macrokid_core = { path = "../macrokid_core" }
+bitflags = "2"
 macrokid_graphics_proto = { path = "../macrokid_graphics_proto", optional = true }
 
 [features]
@@ -44,3 +45,5 @@ optional = true
 
 [dev-dependencies]
 macrokid_graphics_derive = { path = "../macrokid_graphics_derive" }
+macrokid_graphics_lighting = { path = "../macrokid_graphics_lighting" }
+macrokid_graphics_lighting_derive = { path = "../macrokid_graphics_lighting_derive" }

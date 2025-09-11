@@ -47,7 +47,19 @@ fn map_format(fmt: &str) -> vk::Format {
         "vec2" => vk::Format::R32G32_SFLOAT,
         "vec3" => vk::Format::R32G32B32_SFLOAT,
         "vec4" => vk::Format::R32G32B32A32_SFLOAT,
-        "rgba8_unorm" | "u8x4_norm" => vk::Format::R8G8B8A8_UNORM,
+        "rgba8_unorm" | "r8g8b8a8_unorm" | "u8x4_norm" => vk::Format::R8G8B8A8_UNORM,
+        "rgba8_srgb" | "r8g8b8a8_srgb" => vk::Format::R8G8B8A8_SRGB,
+        "bgra8_unorm" | "b8g8r8a8_unorm" => vk::Format::B8G8R8A8_UNORM,
+        "bgra8_srgb" | "b8g8r8a8_srgb" => vk::Format::B8G8R8A8_SRGB,
+        "rgba16_unorm" | "r16g16b16a16_unorm" => vk::Format::R16G16B16A16_UNORM,
+        "rgba16f" | "r16g16b16a16_sfloat" => vk::Format::R16G16B16A16_SFLOAT,
+        "r16f" | "r16_sfloat" => vk::Format::R16_SFLOAT,
+        "rg16f" | "r16g16_sfloat" => vk::Format::R16G16_SFLOAT,
+        "r32f" | "r32_sfloat" => vk::Format::R32_SFLOAT,
+        "rg32f" | "r32g32_sfloat" => vk::Format::R32G32_SFLOAT,
+        "rgb32f" | "r32g32b32_sfloat" => vk::Format::R32G32B32_SFLOAT,
+        "rgba32f" | "r32g32b32a32_sfloat" => vk::Format::R32G32B32A32_SFLOAT,
+        "rgb10a2_unorm" | "a2b10g10r10_unorm" => vk::Format::A2B10G10R10_UNORM_PACK32,
         _ => vk::Format::R32G32B32A32_SFLOAT,
     }
 }
@@ -83,6 +95,64 @@ pub fn color_blend_attachment_from(desc: &PipelineDesc) -> vk::PipelineColorBlen
         .color_write_mask(vk::ColorComponentFlags::R | vk::ColorComponentFlags::G | vk::ColorComponentFlags::B | vk::ColorComponentFlags::A)
         .blend_enable(enable)
         .build()
+}
+
+pub fn color_blend_attachments_from(desc: &PipelineDesc) -> Vec<vk::PipelineColorBlendAttachmentState> {
+    if let Some(colors) = desc.color_targets {
+        if !colors.is_empty() {
+            return colors
+                .iter()
+                .map(|c| {
+                    let enable = c.blend.unwrap_or_else(|| desc.blend.as_ref().map(|b| b.enable).unwrap_or(false));
+                    vk::PipelineColorBlendAttachmentState::builder()
+                        .color_write_mask(
+                            vk::ColorComponentFlags::R
+                                | vk::ColorComponentFlags::G
+                                | vk::ColorComponentFlags::B
+                                | vk::ColorComponentFlags::A,
+                        )
+                        .blend_enable(enable)
+                        .build()
+                })
+                .collect();
+        }
+    }
+    vec![color_blend_attachment_from(desc)]
+}
+
+// Public helpers to map color/depth format strings to Vulkan formats
+pub fn parse_color_format(s: &str) -> Option<vk::Format> {
+    let f = match s.to_ascii_lowercase().as_str() {
+        // 8-bit
+        "rgba8_unorm" | "r8g8b8a8_unorm" => vk::Format::R8G8B8A8_UNORM,
+        "rgba8_srgb" | "r8g8b8a8_srgb" => vk::Format::R8G8B8A8_SRGB,
+        "bgra8_unorm" | "b8g8r8a8_unorm" => vk::Format::B8G8R8A8_UNORM,
+        "bgra8_srgb" | "b8g8r8a8_srgb" => vk::Format::B8G8R8A8_SRGB,
+        // 10-bit
+        "rgb10a2_unorm" | "a2b10g10r10_unorm" => vk::Format::A2B10G10R10_UNORM_PACK32,
+        // 16-bit
+        "rgba16_unorm" | "r16g16b16a16_unorm" => vk::Format::R16G16B16A16_UNORM,
+        "rgba16f" | "r16g16b16a16_sfloat" => vk::Format::R16G16B16A16_SFLOAT,
+        "rg16f" | "r16g16_sfloat" => vk::Format::R16G16_SFLOAT,
+        "r16f" | "r16_sfloat" => vk::Format::R16_SFLOAT,
+        // 32-bit float
+        "r32f" | "r32_sfloat" => vk::Format::R32_SFLOAT,
+        "rg32f" | "r32g32_sfloat" => vk::Format::R32G32_SFLOAT,
+        "rgb32f" | "r32g32b32_sfloat" => vk::Format::R32G32B32_SFLOAT,
+        "rgba32f" | "r32g32b32a32_sfloat" => vk::Format::R32G32B32A32_SFLOAT,
+        _ => return None,
+    };
+    Some(f)
+}
+
+pub fn parse_depth_format(s: &str) -> Option<vk::Format> {
+    match s {
+        "D32_SFLOAT" | "d32_sfloat" => Some(vk::Format::D32_SFLOAT),
+        "D24_UNORM_S8_UINT" | "d24_unorm_s8_uint" => Some(vk::Format::D24_UNORM_S8_UINT),
+        "D32_SFLOAT_S8_UINT" | "d32_sfloat_s8_uint" => Some(vk::Format::D32_SFLOAT_S8_UINT),
+        "D16_UNORM" | "d16_unorm" => Some(vk::Format::D16_UNORM),
+        _ => None,
+    }
 }
 
 pub fn depth_stencil_from(desc: &PipelineDesc) -> vk::PipelineDepthStencilStateCreateInfo {
@@ -131,4 +201,3 @@ pub fn dynamic_states_from(desc: &PipelineDesc) -> Vec<vk::DynamicState> {
         v
     } else { Vec::new() }
 }
-

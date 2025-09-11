@@ -17,4 +17,6 @@ members = [
     "examples/gfx_dsl_support",
     "examples/gfx_dsl_builder_derive",
     "examples/render_resources",
+    "macrokid_graphics_lighting",
+    "macrokid_graphics_lighting_derive",
 ]

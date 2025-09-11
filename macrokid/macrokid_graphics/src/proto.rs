@@ -59,7 +59,20 @@ impl TryFrom<pb::PipelineDesc> for PipelineDesc {
         let raster = v.raster.map(|r| map_raster(&r));
         let blend = v.blend.map(|b| ColorBlendState { enable: b.enable });
         let samples = if v.samples == 0 { None } else { Some(v.samples) };
-        Ok(PipelineDesc { name: Box::leak(v.name.into_boxed_str()), shaders, topology, depth: v.depth, raster, blend, samples, depth_stencil: None, dynamic: None, push_constants: None })
+        Ok(PipelineDesc {
+            name: Box::leak(v.name.into_boxed_str()),
+            shaders,
+            topology,
+            depth: v.depth,
+            raster,
+            blend,
+            samples,
+            depth_stencil: None,
+            dynamic: None,
+            push_constants: None,
+            color_targets: None,
+            depth_target: None,
+        })
     }
 }
 

@@ -5,5 +5,6 @@ pub mod engine;
 pub mod vk_linux;
 #[cfg(feature = "vulkan-linux")]
 pub mod vk_bridge;
+pub mod render_graph;
 #[cfg(feature = "proto")]
 pub mod proto;

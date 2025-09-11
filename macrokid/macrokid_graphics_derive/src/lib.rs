@@ -9,6 +9,7 @@ use macrokid_core::exclusive_schemas;
 use quote::quote;
 use crate::gen::CodeGen;
 use syn::DeriveInput;
+use syn::spanned::Spanned;
 
 mod gen;
 
@@ -295,7 +296,7 @@ fn expand_buffer_layout(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
 
 // ================= GraphicsPipeline derive =================
 
-derive_entry!(GraphicsPipeline, attrs = [pipeline], handler = expand_graphics_pipeline);
+derive_entry!(GraphicsPipeline, attrs = [pipeline, color_target, depth_target], handler = expand_graphics_pipeline);
 
 fn expand_graphics_pipeline(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let spec = TypeSpec::from_derive_input(input)?;
@@ -356,6 +357,9 @@ fn expand_graphics_pipeline(input: DeriveInput) -> syn::Result<proc_macro2::Toke
         depth_stencil: proc_macro2::TokenStream,
         dynamic: proc_macro2::TokenStream,
         push_constants: proc_macro2::TokenStream,
+        // attachment extensions
+        color_entries: Option<Vec<proc_macro2::TokenStream>>,
+        depth_target: proc_macro2::TokenStream,
     }
     // Build optional state tokens
     let polygon_tokens = match polygon_s.unwrap_or("Fill") {
@@ -414,6 +418,49 @@ fn expand_graphics_pipeline(input: DeriveInput) -> syn::Result<proc_macro2::Toke
         quote! { Some(macrokid_graphics::pipeline::PushConstantRange { size: #sz, stages: #stages }) }
     } else { quote! { None } };
 
+    // Attachment extension parsing
+    // Collect repeated #[color_target(format = "..", blend = true|false)] attributes
+    let mut color_entries: Vec<proc_macro2::TokenStream> = Vec::new();
+    for a in &spec.attrs {
+        if a.path().is_ident("color_target") {
+            // Parse nested kv pairs for this single attribute occurrence
+            let parsed = macrokid_core::common::attrs::parse_nested_attrs(&[a.clone()], "color_target")?;
+            let mut fmt: Option<String> = None;
+            let mut blend: Option<bool> = None;
+            for (k, v) in parsed {
+                match k.as_str() {
+                    "format" => fmt = Some(v),
+                    "blend" => {
+                        let vl = v.trim().to_ascii_lowercase();
+                        blend = match vl.as_str() {
+                            "true" | "1" | "yes" | "on" => Some(true),
+                            "false" | "0" | "no" | "off" => Some(false),
+                            _ => None,
+                        };
+                    }
+                    _ => {}
+                }
+            }
+            let fmt = fmt.ok_or_else(|| syn::Error::new(a.span(), "color_target requires format=..."))?;
+            let blend_ts = if let Some(b) = blend { quote! { Some(#b) } } else { quote! { None } };
+            color_entries.push(quote! { macrokid_graphics::pipeline::ColorTargetDesc { format: #fmt, blend: #blend_ts } });
+        }
+    }
+    let ct_entries_tokens: Option<Vec<proc_macro2::TokenStream>> = if color_entries.is_empty() { None } else { Some(color_entries.clone()) };
+    // No external module; embed color target slice inside the pipeline module
+
+    // Optional #[depth_target(format = "D32_SFLOAT")] attribute
+    let mut depth_target_tokens: proc_macro2::TokenStream = quote! { None };
+    for a in &spec.attrs {
+        if a.path().is_ident("depth_target") {
+            let parsed = macrokid_core::common::attrs::parse_nested_attrs(&[a.clone()], "depth_target")?;
+            let mut fmt: Option<String> = None;
+            for (k, v) in parsed { if k == "format" { fmt = Some(v); } }
+            if let Some(fmt) = fmt { depth_target_tokens = quote! { Some(macrokid_graphics::pipeline::DepthTargetDesc { format: #fmt }) } };
+            break;
+        }
+    }
+
     let gp_input = GPInput {
         mod_ident: mod_ident.clone(),
         name: name.to_string(),
@@ -428,16 +475,22 @@ fn expand_graphics_pipeline(input: DeriveInput) -> syn::Result<proc_macro2::Toke
         depth_stencil: depth_tokens,
         dynamic: dynamic_tokens,
         push_constants: pc_tokens,
+        color_entries: if color_entries.is_empty() { None } else { Some(color_entries) },
+        depth_target: depth_target_tokens,
     };
 
     struct ModGen;
     impl crate::gen::CodeGen<GPInput> for ModGen {
         type Output = proc_macro2::TokenStream;
         fn generate(i: &GPInput) -> Self::Output {
-            let GPInput { mod_ident, name, vs, fs, topology, depth, raster, blend, samples, depth_stencil, dynamic, push_constants, .. } = i;
+            let GPInput { mod_ident, name, vs, fs, topology, depth, raster, blend, samples, depth_stencil, dynamic, push_constants, color_entries, depth_target, .. } = i;
+            let (ct_slice, ct_field) = if let Some(entries) = color_entries {
+                (quote! { pub static __COLOR: &[macrokid_graphics::pipeline::ColorTargetDesc] = &[ #( #entries ),* ]; }, quote! { Some(__COLOR) })
+            } else { (quote! {}, quote! { None }) };
             quote! {
                 #[allow(non_snake_case)]
                 mod #mod_ident {
+                    #ct_slice
                     pub static DESC: macrokid_graphics::pipeline::PipelineDesc = macrokid_graphics::pipeline::PipelineDesc {
                         name: #name,
                         shaders: macrokid_graphics::pipeline::ShaderPaths { vs: #vs, fs: #fs },
@@ -449,6 +502,8 @@ fn expand_graphics_pipeline(input: DeriveInput) -> syn::Result<proc_macro2::Toke
                         depth_stencil: #depth_stencil,
                         dynamic: #dynamic,
                         push_constants: #push_constants,
+                        color_targets: #ct_field,
+                        depth_target: #depth_target,
                     };
                 }
             }
@@ -538,6 +593,7 @@ fn expand_render_engine(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
                     app: #app_s,
                     window: macrokid_graphics::engine::WindowCfg { width: #width, height: #height, vsync: #vsync },
                     pipelines,
+                    options: macrokid_graphics::engine::BackendOptions::default(),
                 }
             }
         }
@@ -546,4 +602,177 @@ fn expand_render_engine(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
         }
     };
     Ok(gen)
+}
+
+// ================= RenderPass derive (minimal graph node) =================
+
+derive_entry!(RenderPass, attrs = [pass, color_target, depth_target, input, output], handler = expand_render_pass);
+
+fn expand_render_pass(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let spec = TypeSpec::from_derive_input(input)?;
+    let ident = spec.ident.clone();
+    let pass_schema = macrokid_core::attr_schema::AttrSchema::new("pass")
+        .opt_str("name")
+        .opt_str("kind");
+    let attrs = macrokid_core::common::attr_schema::scope::on_type(&spec, &pass_schema)?;
+    let name = attrs.get_str("name").unwrap_or(&ident.to_string()).to_string();
+    let kind_tokens = match attrs.get_str("kind").unwrap_or("graphics").to_ascii_lowercase().as_str() {
+        "graphics" => quote! { macrokid_graphics::render_graph::PassKind::Graphics },
+        "compute" => quote! { macrokid_graphics::render_graph::PassKind::Compute },
+        other => return Err(syn::Error::new(spec.span, format!("unknown pass kind '{}': expected graphics|compute", other))),
+    };
+
+    // Collect color targets (reuse same grammar as GraphicsPipeline)
+    let mut color_entries: Vec<proc_macro2::TokenStream> = Vec::new();
+    for a in &spec.attrs {
+        if a.path().is_ident("color_target") {
+            let parsed = macrokid_core::common::attrs::parse_nested_attrs(&[a.clone()], "color_target")?;
+            let mut fmt: Option<String> = None;
+            let mut blend: Option<bool> = None;
+            for (k, v) in parsed { match k.as_str() { "format" => fmt = Some(v), "blend" => { let vl = v.to_ascii_lowercase(); blend = match vl.as_str() { "true"|"1"|"yes"|"on" => Some(true), "false"|"0"|"no"|"off" => Some(false), _ => None }; }, _ => {} } }
+            let fmt = fmt.ok_or_else(|| syn::Error::new(a.span(), "color_target requires format=..."))?;
+            let blend_ts = if let Some(b) = blend { quote! { Some(#b) } } else { quote! { None } };
+            color_entries.push(quote! { macrokid_graphics::pipeline::ColorTargetDesc { format: #fmt, blend: #blend_ts } });
+        }
+    }
+    let ct_entries_tokens: Option<Vec<proc_macro2::TokenStream>> = if color_entries.is_empty() { None } else { Some(color_entries.clone()) };
+    let (ct_mod_ident_opt, ct_mod_tokens_opt) = if color_entries.is_empty() {
+        (None, None)
+    } else {
+        let ty = quote! { macrokid_graphics::pipeline::ColorTargetDesc };
+        let (mod_ident, module) = macrokid_core::common::codegen::static_slice_mod("ct", ty.clone(), color_entries);
+        (Some(mod_ident), Some(module))
+    };
+
+    // Optional depth target
+    let mut depth_target_tokens: proc_macro2::TokenStream = quote! { None };
+    for a in &spec.attrs {
+        if a.path().is_ident("depth_target") {
+            let parsed = macrokid_core::common::attrs::parse_nested_attrs(&[a.clone()], "depth_target")?;
+            let mut fmt: Option<String> = None;
+            for (k, v) in parsed { if k == "format" { fmt = Some(v); } }
+            if let Some(fmt) = fmt { depth_target_tokens = quote! { Some(macrokid_graphics::pipeline::DepthTargetDesc { format: #fmt }) } };
+            break;
+        }
+    }
+    // Optional inputs as repeated #[input(name = "...")]
+    let mut inputs: Vec<String> = Vec::new();
+    for a in &spec.attrs { if a.path().is_ident("input") {
+        let parsed = macrokid_core::common::attrs::parse_nested_attrs(&[a.clone()], "input")?;
+        for (k, v) in parsed { if k == "name" { inputs.push(v); } }
+    }}
+    let input_items_tokens: Option<Vec<proc_macro2::TokenStream>> = if inputs.is_empty() { None } else { Some(inputs.iter().map(|s| { let s = s.clone(); quote! { #s } }).collect()) };
+
+    // Rich outputs (preferred). Users can specify named outputs with sizes/usages.
+    // #[output(name = "gbuf.albedo", format = "rgba16f", size = "rel(1.0,1.0)", usage = "color|sampled", samples = 1)]
+    let out_schema = macrokid_core::attr_schema::AttrSchema::new("output")
+        .req_str("name").req_str("format")
+        .opt_str("size").opt_str("usage").opt_int("samples");
+    #[derive(Clone, Debug)]
+    struct OutRec { name: String, format: String, size: String, usage: String, samples: u32, is_depth: bool }
+    let mut outs: Vec<OutRec> = Vec::new();
+    for a in &spec.attrs {
+        if a.path().is_ident("output") {
+            let parsed = out_schema.parse(&[a.clone()])?;
+            let name = parsed.try_get_str("name")?.to_string();
+            let format = parsed.try_get_str("format")?.to_string();
+            let size = parsed.get_str("size").unwrap_or("rel(1.0,1.0)").to_string();
+            let usage = parsed.get_str("usage").unwrap_or("color").to_string();
+            let samples = parsed.get_int("samples").unwrap_or(1) as u32;
+            let is_depth = usage.to_ascii_lowercase().split(|c| c=='|' || c==',' || c==' ').any(|t| t.trim()=="depth");
+            outs.push(OutRec { name, format, size, usage, samples, is_depth });
+        }
+    }
+    // If a depth_target(format=..) exists but not declared as output, synthesize an output named "depth"
+    if depth_target_tokens.to_string().starts_with("Some(") && !outs.iter().any(|o| o.is_depth) {
+        outs.push(OutRec { name: "depth".into(), format: "D32_SFLOAT".into(), size: "rel(1.0,1.0)".into(), usage: "depth".into(), samples: 1, is_depth: true });
+    }
+
+    let mod_ident = syn::Ident::new(&format!("__mk_pass_{}", name), Span::call_site());
+    let module = {
+        let ct_slice = if let Some(items) = &ct_entries_tokens {
+            quote! { pub static __COLOR: &[macrokid_graphics::pipeline::ColorTargetDesc] = &[ #( #items ),* ]; }
+        } else { quote! {} };
+        // Helpers to parse size/usage strings into token streams
+        fn parse_size_tokens(s: &str) -> syn::Result<proc_macro2::TokenStream> {
+            let lower = s.trim().to_ascii_lowercase();
+            if lower == "swapchain" { return Ok(quote! { macrokid_graphics::render_graph::SizeSpec::Swapchain }); }
+            if let Some(rest) = lower.strip_prefix("rel(") { if let Some(end) = rest.strip_suffix(")") {
+                let parts: Vec<&str> = end.split(',').collect();
+                if parts.len() == 2 {
+                    let sx: f32 = parts[0].trim().parse().map_err(|_| syn::Error::new(Span::call_site(), format!("invalid rel size: '{}'", s)))?;
+                    let sy: f32 = parts[1].trim().parse().map_err(|_| syn::Error::new(Span::call_site(), format!("invalid rel size: '{}'", s)))?;
+                    return Ok(quote! { macrokid_graphics::render_graph::SizeSpec::Rel { sx: #sx, sy: #sy } });
+                }
+            } }
+            if let Some(rest) = lower.strip_prefix("abs(") { if let Some(end) = rest.strip_suffix(")") {
+                let parts: Vec<&str> = end.split(',').collect();
+                if parts.len() == 2 {
+                    let w: u32 = parts[0].trim().parse().map_err(|_| syn::Error::new(Span::call_site(), format!("invalid abs size: '{}'", s)))?;
+                    let h: u32 = parts[1].trim().parse().map_err(|_| syn::Error::new(Span::call_site(), format!("invalid abs size: '{}'", s)))?;
+                    return Ok(quote! { macrokid_graphics::render_graph::SizeSpec::Abs { width: #w, height: #h } });
+                }
+            } }
+            Err(syn::Error::new(Span::call_site(), format!("unknown size spec '{}': use swapchain|rel(x,y)|abs(w,h)", s)))
+        }
+        fn parse_usage_tokens(s: &str) -> proc_macro2::TokenStream {
+            let mut expr = quote! { macrokid_graphics::render_graph::UsageMask::empty() };
+            for part in s.split(|c| c=='|' || c==',' || c==' ') {
+                let t = part.trim().to_ascii_lowercase();
+                if t.is_empty() { continue; }
+                let flag = match t.as_str() {
+                    "color" => quote! { macrokid_graphics::render_graph::UsageMask::COLOR },
+                    "depth" => quote! { macrokid_graphics::render_graph::UsageMask::DEPTH },
+                    "sampled" => quote! { macrokid_graphics::render_graph::UsageMask::SAMPLED },
+                    "storage" => quote! { macrokid_graphics::render_graph::UsageMask::STORAGE },
+                    "transfer_src" | "xfer_src" => quote! { macrokid_graphics::render_graph::UsageMask::TRANSFER_SRC },
+                    "transfer_dst" | "xfer_dst" => quote! { macrokid_graphics::render_graph::UsageMask::TRANSFER_DST },
+                    _ => quote! { macrokid_graphics::render_graph::UsageMask::empty() },
+                };
+                expr = quote! { (#expr) | (#flag) };
+            }
+            expr
+        }
+
+        let out_items: Vec<proc_macro2::TokenStream> = outs.iter().map(|o| {
+            let name = o.name.clone();
+            let format = o.format.clone();
+            let size_tokens = parse_size_tokens(&o.size).unwrap_or(quote! { macrokid_graphics::render_graph::SizeSpec::Rel { sx: 1.0, sy: 1.0 } });
+            let usage_tokens = parse_usage_tokens(&o.usage);
+            let samples = o.samples;
+            let is_depth = o.is_depth;
+            quote! { macrokid_graphics::render_graph::OutputDesc { name: #name, format: #format, size: #size_tokens, usage: #usage_tokens, samples: #samples, is_depth: #is_depth } }
+        }).collect();
+        let outs_slice = if outs.is_empty() { quote! {} } else { quote! { pub static __OUTS: &[macrokid_graphics::render_graph::OutputDesc] = &[ #( #out_items ),* ]; } };
+        let inputs_slice = if let Some(items) = &input_items_tokens {
+            quote! { pub static __INPUTS: &[&'static str] = &[ #( #items ),* ]; }
+        } else { quote! {} };
+        let ct_field = if ct_entries_tokens.is_some() { quote! { Some(__COLOR) } } else { quote! { None } };
+        let outs_field = if outs.is_empty() { quote! { None } } else { quote! { Some(__OUTS) } };
+        let inputs_field = if input_items_tokens.is_some() { quote! { Some(__INPUTS) } } else { quote! { None } };
+        quote! {
+            #[allow(non_snake_case)]
+            mod #mod_ident {
+                #ct_slice
+                #outs_slice
+                #inputs_slice
+                pub static DESC: macrokid_graphics::render_graph::PassDesc = macrokid_graphics::render_graph::PassDesc {
+                    name: #name,
+                    kind: #kind_tokens,
+                    color: #ct_field,
+                    depth: #depth_target_tokens,
+                    inputs: #inputs_field,
+                    outputs: #outs_field,
+                };
+            }
+        }
+    };
+
+    let impls = quote! {
+        impl macrokid_graphics::render_graph::PassInfo for #ident {
+            fn pass_desc() -> &'static macrokid_graphics::render_graph::PassDesc { &#mod_ident::DESC }
+        }
+        impl #ident { pub fn describe_pass() -> &'static macrokid_graphics::render_graph::PassDesc { <Self as macrokid_graphics::render_graph::PassInfo>::pass_desc() } }
+    };
+    Ok(quote! { #module #impls })
 }
