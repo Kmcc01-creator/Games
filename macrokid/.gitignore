@@ -1,0 +1,15 @@
+# Rust builds
+target/
+
+# Node tooling (not part of Rust workspace)
+node_modules/
+
+# Editor/OS cruft
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Cargo/Build artifacts
+**/*.rs.bk
+

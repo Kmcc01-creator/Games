@@ -19,4 +19,6 @@ members = [
     "examples/render_resources",
     "macrokid_graphics_lighting",
     "macrokid_graphics_lighting_derive",
+    "macrokid_threads_derive",
+    "examples/threads_demo",
 ]

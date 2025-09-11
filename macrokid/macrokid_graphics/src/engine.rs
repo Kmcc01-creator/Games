@@ -1,13 +1,16 @@
-//! Minimal engine/runtime scaffolding inspired by the gfx DSL support crate,
-//! ported into macrokid_graphics and aligned with current macrokid_core patterns.
+//! Minimal engine/runtime scaffolding aligned with macrokid_core patterns.
 //!
 //! Goals:
-//! - Keep runtime types close to the derives provided by macrokid_graphics_derive
-//! - Provide a simple backend trait and an Engine wrapper
-//! - Offer validation helpers that work with ResourceBindings and VertexLayout
+//! - Keep runtime types close to the derives provided by macrokid_graphics_derive.
+//! - Provide a simple backend trait and an Engine wrapper.
+//! - Offer validation helpers that work with ResourceBindings and VertexLayout.
+//!
+//! Threading & design overview:
+//! - Intended to support multi-threaded recording with single-threaded submission.
+//! - See `ENGINE_RUNTIME.md` for the broader plan (Renderer/Frame scaffolding, job system).
 //!
 //! Notes:
-//! - This module intentionally avoids any windowing or device lifetimes; it focuses on
+//! - This module intentionally avoids windowing/device lifetimes; it focuses on
 //!   structuring and validating pipeline descriptions.
 
 use crate::pipeline::PipelineDesc;
@@ -55,7 +58,11 @@ pub struct EngineConfig {
 }
 
 /// Backend abstraction for creating pipelines and presenting frames.
-pub trait RenderBackend {
+/// Backend abstraction for creating pipelines and presenting frames.
+///
+/// Thread-safety: backends are expected to be `Send + Sync + 'static` to enable
+/// sharing handles across threads when recording work.
+pub trait RenderBackend: Send + Sync + 'static {
     fn name() -> &'static str;
     fn create_device() { println!("[{}] create_device()", Self::name()); }
     fn create_pipeline(desc: &PipelineDesc) {
@@ -71,6 +78,10 @@ pub trait RenderBackend {
 pub struct VulkanBackend;
 impl RenderBackend for VulkanBackend { fn name() -> &'static str { "vulkan" } }
 
+/// Thin façade tagged by backend type.
+///
+/// `PhantomData<B>` intentionally couples Engine's auto-traits (Send/Sync) to the backend
+/// so that Engine can only be sent/shared if the backend supports it.
 pub struct Engine<B: RenderBackend> { _backend: core::marker::PhantomData<B> }
 
 impl<B: RenderBackend> Engine<B> {
@@ -288,6 +299,28 @@ where
 /// statically described pipelines and window/app metadata.
 pub trait RenderEngineInfo {
     fn engine_config() -> EngineConfig;
+}
+
+// ======================
+// Minimal Renderer/Frame scaffolding (forward-looking)
+// ======================
+
+/// Thread-safe façade that governs frame lifetimes and encoders.
+///
+/// Implementations may return backend-specific `Frame`/`CommandCtx` types
+/// and are free to parallelize recording internally.
+pub trait Renderer: Send + Sync {
+    type Frame: Frame;
+    fn begin_frame(&self) -> Self::Frame;
+    fn end_frame(&self, frame: Self::Frame);
+}
+
+/// Per-frame lifetime guard. Creates recording contexts for passes/subpasses.
+pub trait Frame {
+    /// Backend-specific command recording context (likely !Send).
+    type CommandCtx;
+    /// Acquire a recording context for a named pass.
+    fn encoder_for(&self, _pass: &'static str) -> Self::CommandCtx;
 }
 
 #[cfg(test)]

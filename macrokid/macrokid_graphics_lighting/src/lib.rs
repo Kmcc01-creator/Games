@@ -35,39 +35,39 @@ void main() {
     v_uv = a_uv;
     gl_Position = uScene.mvp * vec4(a_pos, 1.0);
 }
-
-// Convenience: build a PipelineDesc for a forward lighting pass from a LightingModel
-pub fn forward_pipeline_desc_for<M: LightingModel>(name: &str) -> macrokid_graphics::pipeline::PipelineDesc {
-    use macrokid_graphics::pipeline::*;
-    let ss = M::shader_sources();
-    let vs_prefixed = format!("inline.vert:{}", ss.vs);
-    let fs_prefixed = format!("inline.frag:{}", ss.fs);
-    let vs_static: &'static str = Box::leak(vs_prefixed.into_boxed_str());
-    let fs_static: &'static str = Box::leak(fs_prefixed.into_boxed_str());
-    PipelineDesc {
-        name: Box::leak(name.to_string().into_boxed_str()),
-        shaders: ShaderPaths { vs: vs_static, fs: fs_static },
-        topology: Topology::TriangleList,
-        depth: true,
-        raster: Some(RasterState { polygon: PolygonMode::Fill, cull: CullMode::Back, front_face: FrontFace::Cw }),
-        blend: Some(ColorBlendState { enable: false }),
-        samples: Some(1),
-        depth_stencil: Some(DepthState { test: true, write: true, compare: CompareOp::LessOrEqual }),
-        dynamic: Some(DynamicStateDesc { viewport: true, scissor: true }),
-        push_constants: None,
-        color_targets: None,
-        depth_target: Some(DepthTargetDesc { format: "D32_SFLOAT" }),
-    }
-}
-
-// Convenience: return both a synthesized PipelineDesc and a phantom for the RB type
-pub fn forward_pipeline_and_rb<M>(name: &str) -> (macrokid_graphics::pipeline::PipelineDesc, core::marker::PhantomData<<M as HasBindings>::RB>)
-where
-    M: LightingModel + HasBindings,
-{
-    (forward_pipeline_desc_for::<M>(name), core::marker::PhantomData::<M::RB>)
-}
 "#;
+
+    // Convenience: build a PipelineDesc for a forward lighting pass from a LightingModel
+    pub fn forward_pipeline_desc_for<M: crate::LightingModel>(name: &str) -> macrokid_graphics::pipeline::PipelineDesc {
+        use macrokid_graphics::pipeline::*;
+        let ss = M::shader_sources();
+        let vs_prefixed = format!("inline.vert:{}", ss.vs);
+        let fs_prefixed = format!("inline.frag:{}", ss.fs);
+        let vs_static: &'static str = Box::leak(vs_prefixed.into_boxed_str());
+        let fs_static: &'static str = Box::leak(fs_prefixed.into_boxed_str());
+        PipelineDesc {
+            name: Box::leak(name.to_string().into_boxed_str()),
+            shaders: ShaderPaths { vs: vs_static, fs: fs_static },
+            topology: Topology::TriangleList,
+            depth: true,
+            raster: Some(RasterState { polygon: PolygonMode::Fill, cull: CullMode::Back, front_face: FrontFace::Cw }),
+            blend: Some(ColorBlendState { enable: false }),
+            samples: Some(1),
+            depth_stencil: Some(DepthState { test: true, write: true, compare: CompareOp::LessOrEqual }),
+            dynamic: Some(DynamicStateDesc { viewport: true, scissor: true }),
+            push_constants: None,
+            color_targets: None,
+            depth_target: Some(DepthTargetDesc { format: "D32_SFLOAT" }),
+        }
+    }
+
+    // Convenience: return both a synthesized PipelineDesc and a phantom for the RB type
+    pub fn forward_pipeline_and_rb<M>(name: &str) -> (macrokid_graphics::pipeline::PipelineDesc, core::marker::PhantomData<<M as crate::HasBindings>::RB>)
+    where
+        M: crate::LightingModel + crate::HasBindings,
+    {
+        (forward_pipeline_desc_for::<M>(name), core::marker::PhantomData::<M::RB>)
+    }
 
     pub const FS_PHONG_MIN: &str = r#"#version 450
 layout(location=0) in vec3 v_normal;

@@ -1,0 +1,4 @@
+[alias]
+# Enforce clippy cleanliness by default
+clippy-strict = "clippy -- -D warnings"
+

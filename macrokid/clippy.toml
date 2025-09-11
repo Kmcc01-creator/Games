@@ -1,0 +1,5 @@
+msrv = "1.70.0"
+
+# Keep default lint set manageable; use alias `clippy-strict` to deny warnings.
+# Add per-lint tweaks here if any crate needs scoped adjustments in the future.
+

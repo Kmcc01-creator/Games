@@ -9,3 +9,5 @@ pub use common::{attrs, builders, patterns, diag, type_utils, repr, attr_schema,
 pub use derive::impl_for_trait;
 #[cfg(feature = "pattern_dsl")]
 pub use common::pattern_dsl;
+#[cfg(feature = "threads")]
+pub use common::threads;

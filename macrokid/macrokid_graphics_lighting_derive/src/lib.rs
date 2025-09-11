@@ -1,10 +1,10 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::DeriveInput;
+use syn::{parse_macro_input, DeriveInput};
 
 #[proc_macro_derive(LightingModel, attributes(model))]
 pub fn derive_lighting_model(input: TokenStream) -> TokenStream {
-    let ast: DeriveInput = syn::parse(input).unwrap();
+    let ast: DeriveInput = parse_macro_input!(input as DeriveInput);
     let ident = &ast.ident;
     // Parse #[model = "phong" | "pbr" | "blinn"] (defaults to phong)
     let mut model = String::from("phong");
@@ -55,7 +55,7 @@ pub fn derive_lighting_model(input: TokenStream) -> TokenStream {
 
 #[proc_macro_derive(LightSetup, attributes(light_setup))]
 pub fn derive_light_setup(input: TokenStream) -> TokenStream {
-    let ast: DeriveInput = syn::parse(input).unwrap();
+    let ast: DeriveInput = parse_macro_input!(input as DeriveInput);
     let ident = &ast.ident;
     // Parse optional #[light_setup(shadow_size = "WxH")]
     let mut shadow_w: u32 = 2048;

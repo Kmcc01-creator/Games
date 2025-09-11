@@ -1,0 +1,9 @@
+[package]
+name = "threads_demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+macrokid_core = { path = "../../macrokid_core", features = ["threads"] }
+macrokid_threads_derive = { path = "../../macrokid_threads_derive" }
+

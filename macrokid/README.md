@@ -161,6 +161,19 @@ We’re actively exploring graphics-focused DSLs and cross-language tooling:
 - `macrokid_clang_exec`: Exec-based Clang integration to analyze/generate from C/C++ headers.
 - `examples/graphics_demo`: Shows derives in action and emits C/C++ IR when `CLANG_EXEC_DEMO=1`.
 
+## 🧵 Threaded Scheduling
+
+Macrokid now includes opt-in, derive-friendly job scheduling utilities:
+
+- Runtime (feature-gated): `macrokid_core::threads` with `Scheduler`, `ThreadPool`, `join_all`, `JobRun`, `SpawnExt`, and `ResourceAccess`.
+- Derives crate: `macrokid_threads_derive` providing `#[derive(Job)]`, `#[derive(System)]`, and `#[derive(Schedule)]`.
+- Schedule features:
+  - Stage dependencies via `#[stage(after = "...")]` and sugar `#[stage(before = "...")]` (comma-separated lists supported).
+  - Conflict-aware batching within each stage using `ResourceAccess` (greedy grouping of non-conflicting systems).
+  - Debugging: `topo_groups()` returns topological layers of stages.
+
+See `MACROKID_THREADS.md` for setup and examples, and `examples/threads_demo` for a runnable demo.
+
 Quick links and commands:
 - Graphics overview and Vulkan docs: see `MACROKID_GRAPHICS.md`.
 - Linux Vulkan example (feature-gated):
