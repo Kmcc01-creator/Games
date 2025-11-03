@@ -13,3 +13,4 @@ Thumbs.db
 # Cargo/Build artifacts
 **/*.rs.bk
 
+deps/
