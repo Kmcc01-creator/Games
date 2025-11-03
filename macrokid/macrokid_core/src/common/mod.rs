@@ -15,5 +15,9 @@ pub mod validate;
 pub mod pattern_dsl;
 #[cfg(feature = "codegen")]
 pub mod gen;
+#[cfg(feature = "codegen")]
+pub mod derive_patterns;
+#[cfg(feature = "codegen")]
+pub mod derive_dsl;
 #[cfg(feature = "threads")]
 pub mod threads;

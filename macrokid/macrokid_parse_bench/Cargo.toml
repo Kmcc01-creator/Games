@@ -1,0 +1,16 @@
+[package]
+name = "macrokid_parse_bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+syn = { version = "2", features = ["full", "extra-traits"] }
+proc-macro2 = "1"
+quote = "1"
+
+[[bench]]
+name = "parse_attrs"
+harness = false
+
+[dev-dependencies]
+criterion = "0.5"

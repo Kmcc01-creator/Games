@@ -1,6 +1,7 @@
 pub mod resources;
 pub mod pipeline;
 pub mod engine;
+pub mod assets;
 #[cfg(feature = "vulkan-linux")]
 pub mod vk_linux;
 #[cfg(feature = "vulkan-linux")]

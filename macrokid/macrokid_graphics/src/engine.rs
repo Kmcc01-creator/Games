@@ -47,6 +47,10 @@ pub struct BackendOptions {
     pub adapter_index: Option<usize>,
     /// Preferred adapter kind: "discrete" | "integrated" | "virtual" | "cpu".
     pub adapter_preference: Option<&'static str>,
+    /// If true and compute pipelines exist, skip graphics render pass and present via blit/transfer only.
+    pub compute_only_present: Option<bool>,
+    /// Multiplier for descriptor counts when building descriptor pools (oversize to reduce reallocation risk).
+    pub desc_pool_multiplier: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -54,6 +58,7 @@ pub struct EngineConfig {
     pub app: &'static str,
     pub window: WindowCfg,
     pub pipelines: Vec<PipelineDesc>,
+    pub compute_pipelines: Vec<crate::pipeline::ComputeDesc>,
     pub options: BackendOptions,
 }
 
@@ -148,14 +153,16 @@ pub struct EngineBuilder {
     app: Option<&'static str>,
     window: Option<WindowCfg>,
     pipelines: Vec<PipelineDesc>,
+    compute_pipelines: Vec<crate::pipeline::ComputeDesc>,
     options: BackendOptions,
 }
 
 impl EngineBuilder {
-    pub fn new() -> Self { Self { app: None, window: None, pipelines: Vec::new(), options: BackendOptions::default() } }
+    pub fn new() -> Self { Self { app: None, window: None, pipelines: Vec::new(), compute_pipelines: Vec::new(), options: BackendOptions::default() } }
     pub fn app(mut self, name: &'static str) -> Self { self.app = Some(name); self }
     pub fn window(mut self, width: u32, height: u32, vsync: bool) -> Self { self.window = Some(WindowCfg { width, height, vsync }); self }
     pub fn add_pipeline(mut self, desc: PipelineDesc) -> Self { self.pipelines.push(desc); self }
+    pub fn add_compute(mut self, desc: crate::pipeline::ComputeDesc) -> Self { self.compute_pipelines.push(desc); self }
     /// Replace all backend options at once.
     pub fn options(mut self, options: BackendOptions) -> Self { self.options = options; self }
     /// Convenience setters for common options
@@ -170,11 +177,14 @@ impl EngineBuilder {
     pub fn present_mode_priority(mut self, modes: Vec<&'static str>) -> Self { self.options.present_mode_priority = Some(modes); self }
     pub fn adapter_index(mut self, index: usize) -> Self { self.options.adapter_index = Some(index); self }
     pub fn adapter_preference(mut self, pref: &'static str) -> Self { self.options.adapter_preference = Some(pref); self }
+    pub fn compute_only_present(mut self, enabled: bool) -> Self { self.options.compute_only_present = Some(enabled); self }
+    pub fn desc_pool_multiplier(mut self, mult: u32) -> Self { self.options.desc_pool_multiplier = Some(mult.max(1)); self }
     pub fn build(self) -> Result<EngineConfig, ConfigError> {
         let cfg = EngineConfig {
             app: self.app.unwrap_or("Untitled"),
             window: self.window.unwrap_or(WindowCfg { width: 1280, height: 720, vsync: true }),
             pipelines: self.pipelines,
+            compute_pipelines: self.compute_pipelines,
             options: self.options,
         };
         validate_config(&cfg)?;
@@ -217,6 +227,8 @@ impl BackendOptions {
         if let Ok(v) = env::var("MK_DYNAMIC_SCISSOR") { if let Some(b) = parse_bool(&v) { opts.dynamic_scissor = Some(b); } }
         if let Ok(v) = env::var("MK_ADAPTER_INDEX") { if let Ok(n) = v.parse::<usize>() { opts.adapter_index = Some(n); } }
         if let Ok(v) = env::var("MK_ADAPTER_PREFERENCE") { if !v.is_empty() { opts.adapter_preference = Some(leak(v)); } }
+        if let Ok(v) = env::var("MK_COMPUTE_ONLY_PRESENT") { if let Some(b) = parse_bool(&v) { opts.compute_only_present = Some(b); } }
+        if let Ok(v) = env::var("MK_DESC_POOL_MULTIPLIER") { if let Ok(n) = v.parse::<u32>() { if n > 0 { opts.desc_pool_multiplier = Some(n); } } }
         opts
     }
 
@@ -240,6 +252,8 @@ impl BackendOptions {
         take_if_none!(present_mode_priority);
         take_if_none!(adapter_index);
         take_if_none!(adapter_preference);
+        take_if_none!(compute_only_present);
+        take_if_none!(desc_pool_multiplier);
         self
     }
 
@@ -266,9 +280,11 @@ impl BackendOptions {
         let dyn_sc = match self.dynamic_scissor { Some(b) => b.to_string(), None => "(pipeline-driven)".into() };
         let adapter_idx = or_default(&self.adapter_index, "(any)");
         let adapter_pref = or_default(&self.adapter_preference, "(none)");
+        let compute_only = or_default(&self.compute_only_present.map(|b| if b { "true" } else { "false" }), "(false)");
+        let pool_mult = or_default(&self.desc_pool_multiplier, "(1x)");
         println!(
-            "[gfx] BackendOptions: present_mode={} | swapchain_images={} | color_format={} | color_space={} | depth_format={} | msaa={} | dynamic_viewport={} | dynamic_scissor={} | adapter_index={} | adapter_preference={}",
-            pm, sc_images, color_fmt, color_space, depth_fmt, msaa, dyn_vp, dyn_sc, adapter_idx, adapter_pref
+            "[gfx] BackendOptions: present_mode={} | swapchain_images={} | color_format={} | color_space={} | depth_format={} | msaa={} | dynamic_viewport={} | dynamic_scissor={} | adapter_index={} | adapter_preference={} | compute_only_present={} | desc_pool_multiplier={}",
+            pm, sc_images, color_fmt, color_space, depth_fmt, msaa, dyn_vp, dyn_sc, adapter_idx, adapter_pref, compute_only, pool_mult
         );
     }
 }

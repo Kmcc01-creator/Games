@@ -10,6 +10,6 @@ proc-macro = true
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full", "extra-traits"] }
-macrokid_core = { path = "../macrokid_core" }
+macrokid_core = { path = "../macrokid_core", features = ["codegen"] }
 macrokid_graphics = { path = "../macrokid_graphics" }
 

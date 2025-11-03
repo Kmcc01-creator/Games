@@ -36,6 +36,20 @@ pub struct PipelineDesc {
 
 pub trait PipelineInfo { fn pipeline_desc() -> &'static PipelineDesc; }
 
+#[derive(Clone, Debug)]
+pub struct ComputeDesc {
+    pub name: &'static str,
+    /// Path to compute shader (`.comp`) or SPIR-V (`.spv`).
+    pub shader: &'static str,
+    /// Dispatch group counts passed to `vkCmdDispatch`.
+    pub dispatch: (u32, u32, u32),
+    /// Optional push constant range (size and stages) for compute.
+    pub push_constants: Option<PushConstantRange>,
+    /// Optional explicit descriptor layout for this compute pass (static at compile-time).
+    /// Provide from a `ResourceBindings::bindings()` slice when layouts differ between passes.
+    pub bindings: Option<&'static [crate::resources::BindingDesc]>,
+}
+
 // Backend-agnostic pipeline state (minimal set)
 #[derive(Clone, Debug)]
 pub enum PolygonMode { Fill, Line }

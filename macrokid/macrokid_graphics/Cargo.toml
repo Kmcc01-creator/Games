@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 macrokid_core = { path = "../macrokid_core" }
 bitflags = "2"
+glam = "0.24"
 macrokid_graphics_proto = { path = "../macrokid_graphics_proto", optional = true }
 
 [features]

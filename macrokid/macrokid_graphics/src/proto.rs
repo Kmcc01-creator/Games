@@ -83,6 +83,6 @@ impl TryFrom<pb::EngineConfig> for EngineConfig {
         let window = WindowCfg { width: w.width, height: w.height, vsync: w.vsync };
         let mut pipelines = Vec::with_capacity(v.pipelines.len());
         for p in v.pipelines.into_iter() { pipelines.push(p.try_into()?); }
-        Ok(EngineConfig { app: Box::leak(v.app.into_boxed_str()), window, pipelines })
+        Ok(EngineConfig { app: Box::leak(v.app.into_boxed_str()), window, pipelines, compute_pipelines: Vec::new(), options: crate::engine::BackendOptions::default() })
     }
 }

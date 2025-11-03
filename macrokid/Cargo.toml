@@ -21,4 +21,5 @@ members = [
     "macrokid_graphics_lighting_derive",
     "macrokid_threads_derive",
     "examples/threads_demo",
+    "macrokid_parse_bench",
 ]

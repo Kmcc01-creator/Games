@@ -17,10 +17,12 @@ impl AttrSchema {
     pub fn req_str(mut self, key: &'static str) -> Self { self.specs.push(LowSpec { key, required: true, ty: AttrType::Str }); self }
     pub fn req_bool(mut self, key: &'static str) -> Self { self.specs.push(LowSpec { key, required: true, ty: AttrType::Bool }); self }
     pub fn req_int(mut self, key: &'static str) -> Self { self.specs.push(LowSpec { key, required: true, ty: AttrType::Int }); self }
+    pub fn req_float(mut self, key: &'static str) -> Self { self.specs.push(LowSpec { key, required: true, ty: AttrType::Float }); self }
 
     pub fn opt_str(mut self, key: &'static str) -> Self { self.specs.push(LowSpec { key, required: false, ty: AttrType::Str }); self }
     pub fn opt_bool(mut self, key: &'static str) -> Self { self.specs.push(LowSpec { key, required: false, ty: AttrType::Bool }); self }
     pub fn opt_int(mut self, key: &'static str) -> Self { self.specs.push(LowSpec { key, required: false, ty: AttrType::Int }); self }
+    pub fn opt_float(mut self, key: &'static str) -> Self { self.specs.push(LowSpec { key, required: false, ty: AttrType::Float }); self }
 
     pub fn parse(&self, attrs: &[Attribute]) -> syn::Result<ParsedAttrs> {
         let map = validate_attrs(attrs, self.name, &self.specs)?;
@@ -44,6 +46,7 @@ impl ParsedAttrs {
     }
     pub fn get_bool(&self, k: &str) -> Option<bool> { match self.map.get(k) { Some(AttrValue::Bool(b)) => Some(*b), _ => None } }
     pub fn get_int(&self, k: &str) -> Option<i64> { match self.map.get(k) { Some(AttrValue::Int(i)) => Some(*i), _ => None } }
+    pub fn get_float(&self, k: &str) -> Option<f64> { match self.map.get(k) { Some(AttrValue::Float(f)) => Some(*f), _ => None } }
 
     pub fn try_get_str(&self, k: &str) -> syn::Result<&str> {
         match self.map.get(k) {
@@ -63,6 +66,13 @@ impl ParsedAttrs {
         match self.map.get(k) {
             Some(AttrValue::Int(i)) => Ok(*i),
             Some(_) => Err(syn::Error::new(proc_macro2::Span::call_site(), format!("key '{}' is not an int", k))),
+            None => Err(syn::Error::new(proc_macro2::Span::call_site(), format!("missing required key '{}'", k))),
+        }
+    }
+    pub fn try_get_float(&self, k: &str) -> syn::Result<f64> {
+        match self.map.get(k) {
+            Some(AttrValue::Float(f)) => Ok(*f),
+            Some(_) => Err(syn::Error::new(proc_macro2::Span::call_site(), format!("key '{}' is not a float", k))),
             None => Err(syn::Error::new(proc_macro2::Span::call_site(), format!("missing required key '{}'", k))),
         }
     }
@@ -144,6 +154,7 @@ macro_rules! exclusive_schemas {
     (@push $schema:ident, $k:ident, int) => { $schema.req_int(stringify!($k)) };
     (@push $schema:ident, $k:ident, str) => { $schema.req_str(stringify!($k)) };
     (@push $schema:ident, $k:ident, bool) => { $schema.req_bool(stringify!($k)) };
+    (@push $schema:ident, $k:ident, float) => { $schema.req_float(stringify!($k)) };
 }
 
 #[cfg(test)]
@@ -172,5 +183,44 @@ mod tests {
         let a: Attribute = syn::parse_quote!(#[texture(binding = 1)]);
         let out = set.parse(&[a]).unwrap();
         assert!(matches!(out, Some((ref n, _)) if n == "texture"));
+    }
+
+    #[test]
+    fn parse_float_schema() {
+        let schema = AttrSchema::new("primitive")
+            .opt_float("size")
+            .opt_float("radius")
+            .req_float("scale");
+
+        // Test with all float values present
+        let attr: Attribute = parse_quote!(#[primitive(size = 1.5, radius = 2.0, scale = 3.5)]);
+        let res = schema.parse(&[attr]).expect("parse should succeed");
+        assert_eq!(res.get_float("size"), Some(1.5));
+        assert_eq!(res.get_float("radius"), Some(2.0));
+        assert_eq!(res.get_float("scale"), Some(3.5));
+        assert_eq!(res.try_get_float("scale").unwrap(), 3.5);
+
+        // Test with optional float missing
+        let attr2: Attribute = parse_quote!(#[primitive(scale = 1.0)]);
+        let res2 = schema.parse(&[attr2]).expect("parse should succeed");
+        assert_eq!(res2.get_float("size"), None);
+        assert_eq!(res2.get_float("radius"), None);
+        assert_eq!(res2.get_float("scale"), Some(1.0));
+
+        // Test with different float notations
+        let attr3: Attribute = parse_quote!(#[primitive(size = 0.5, scale = 10.25)]);
+        let res3 = schema.parse(&[attr3]).expect("parse should succeed");
+        assert_eq!(res3.get_float("size"), Some(0.5));
+        assert_eq!(res3.get_float("scale"), Some(10.25));
+    }
+
+    #[test]
+    fn parse_float_required_missing() {
+        let schema = AttrSchema::new("primitive").req_float("scale");
+
+        // Missing required float should error
+        let attr: Attribute = parse_quote!(#[primitive(size = 1.5)]);
+        let res = schema.parse(&[attr]);
+        assert!(res.is_err());
     }
 }

@@ -25,6 +25,8 @@ pub fn descriptor_bindings_from<RB: ResourceBindings>() -> BTreeMap<u32, Vec<vk:
             ResourceKind::Texture => vk::DescriptorType::SAMPLED_IMAGE,
             ResourceKind::Sampler => vk::DescriptorType::SAMPLER,
             ResourceKind::CombinedImageSampler => vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            ResourceKind::StorageBuffer => vk::DescriptorType::STORAGE_BUFFER,
+            ResourceKind::StorageImage => vk::DescriptorType::STORAGE_IMAGE,
         };
         let stage_flags = stage_flags_from_binding_stages(&b.stages);
         let bind = vk::DescriptorSetLayoutBinding::builder()

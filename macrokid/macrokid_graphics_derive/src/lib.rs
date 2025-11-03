@@ -4,6 +4,7 @@ use macrokid_core::{
     collect,
     codegen,
     derive_entry,
+    common::derive_patterns::StaticSliceDerive,
 };
 use macrokid_core::exclusive_schemas;
 use quote::quote;
@@ -12,128 +13,295 @@ use syn::DeriveInput;
 use syn::spanned::Spanned;
 
 mod gen;
+mod assets;
 
+// Import asset derive handlers from assets module
+use assets::{expand_procedural_mesh, expand_procedural_texture, expand_asset_bundle};
+
+// Asset derives (proc_macro_derive must be at crate root)
+derive_entry!(ProceduralMesh, attrs = [primitive, transform, material], handler = expand_procedural_mesh);
+derive_entry!(ProceduralTexture, attrs = [texture, pattern, noise], handler = expand_procedural_texture);
+derive_entry!(AssetBundle, attrs = [mesh_ref, texture_ref, material], handler = expand_asset_bundle);
+
+// Resource binding derive
 derive_entry!(ResourceBinding, attrs = [uniform, texture, sampler, combined], handler = expand_resource_binding);
+
+// Descriptor type for resource binding
+#[derive(Clone, Debug)]
+struct BindingDescriptor {
+    field: String,
+    set: u32,
+    binding: u32,
+    kind: proc_macro2::TokenStream,
+    stages: Option<proc_macro2::TokenStream>,
+    span: proc_macro2::Span,
+}
+
+impl quote::ToTokens for BindingDescriptor {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        let field = &self.field;
+        let set = self.set;
+        let binding = self.binding;
+        let kind = &self.kind;
+        let stages = &self.stages;
+        let stages_tokens = match stages {
+            Some(s) => quote! { Some(#s) },
+            None => quote! { None },
+        };
+        tokens.extend(quote! {
+            macrokid_graphics::resources::BindingDesc {
+                field: #field,
+                set: #set,
+                binding: #binding,
+                kind: #kind,
+                stages: #stages_tokens
+            }
+        });
+    }
+}
+
+// ResourceBinding derive implementation using StaticSliceDerive pattern
+struct ResourceBindingDerive;
+
+impl macrokid_core::common::derive_patterns::StaticSliceDerive for ResourceBindingDerive {
+    type Descriptor = BindingDescriptor;
+
+    fn descriptor_type() -> proc_macro2::TokenStream {
+        quote! { macrokid_graphics::resources::BindingDesc }
+    }
+
+    fn collect_descriptors(spec: &TypeSpec) -> syn::Result<Vec<Self::Descriptor>> {
+        // Ensure struct with named fields
+        let st = match &spec.kind {
+            macrokid_core::TypeKind::Struct(st) => st,
+            _ => return Err(syn::Error::new(spec.span, "ResourceBinding expects a struct")),
+        };
+        if !matches!(st.fields(), FieldKind::Named(_)) {
+            return Err(syn::Error::new(spec.span, "ResourceBinding expects a struct with named fields"));
+        }
+
+        // Define mutually exclusive resource kind schemas
+        let kind_set = macrokid_core::exclusive_schemas![
+            uniform(set: int, binding: int, stages: str),
+            texture(set: int, binding: int, stages: str),
+            sampler(set: int, binding: int, stages: str),
+            combined(set: int, binding: int, stages: str),
+        ];
+
+        // Collect records from fields
+        let items: Vec<BindingDescriptor> = collect::from_named_fields(st, |f| {
+            if let Some((kind_name, parsed)) = kind_set.parse(&f.attrs)? {
+                let field = f.ident.as_ref().unwrap().to_string();
+                let set = parsed.try_get_int("set")? as u32;
+                let binding = parsed.try_get_int("binding")? as u32;
+                let stages_str = parsed.get_str("stages");
+
+                // Convert kind name to token stream
+                let kind = match kind_name.as_str() {
+                    "uniform" => quote! { macrokid_graphics::resources::ResourceKind::Uniform },
+                    "texture" => quote! { macrokid_graphics::resources::ResourceKind::Texture },
+                    "sampler" => quote! { macrokid_graphics::resources::ResourceKind::Sampler },
+                    _ => quote! { macrokid_graphics::resources::ResourceKind::CombinedImageSampler },
+                };
+
+                // Parse stages string into token stream
+                let stages = stages_str.map(|s| {
+                    let mut vs = false; let mut fs = false; let mut cs = false;
+                    for part in s.split(|c| c == '|' || c == ',' || c == ' ') {
+                        match part.trim().to_lowercase().as_str() {
+                            "vs" | "vert" | "vertex" => vs = true,
+                            "fs" | "frag" | "fragment" => fs = true,
+                            "cs" | "comp" | "compute" => cs = true,
+                            "" => {},
+                            _ => {} // Unknown tokens ignored for tolerance
+                        }
+                    }
+                    quote! { macrokid_graphics::resources::BindingStages { vs: #vs, fs: #fs, cs: #cs } }
+                });
+
+                Ok(Some(BindingDescriptor { field, set, binding, kind, stages, span: f.span }))
+            } else {
+                Ok(None)
+            }
+        })?;
+
+        // Enforce uniqueness of (set, binding) using validation helper
+        let items = collect::unique_by(items, |r| ((r.set, r.binding), r.span), "duplicate (set,binding)")?;
+
+        Ok(items)
+    }
+
+    fn trait_path() -> proc_macro2::TokenStream {
+        quote! { macrokid_graphics::resources::ResourceBindings }
+    }
+
+    fn method_name() -> proc_macro2::Ident {
+        proc_macro2::Ident::new("bindings", proc_macro2::Span::call_site())
+    }
+
+    fn module_hint() -> &'static str {
+        "rb"
+    }
+
+    fn inherent_method_name() -> String {
+        "describe_bindings".to_string()
+    }
+}
 
 fn expand_resource_binding(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let spec = TypeSpec::from_derive_input(input)?;
-
-    // Ensure struct with named fields
-    let st = match &spec.kind {
-        macrokid_core::TypeKind::Struct(st) => st,
-        _ => return Err(syn::Error::new(spec.span, "ResourceBinding expects a struct")),
-    };
-    if !matches!(st.fields(), FieldKind::Named(_)) {
-        return Err(syn::Error::new(spec.span, "ResourceBinding expects a struct with named fields"));
-    }
-
-    // Define mutually exclusive resource kind schemas
-    let kind_set = macrokid_core::exclusive_schemas![
-        uniform(set: int, binding: int, stages: str),
-        texture(set: int, binding: int, stages: str),
-        sampler(set: int, binding: int, stages: str),
-        combined(set: int, binding: int, stages: str),
-    ];
-
-    #[derive(Clone, Debug)]
-    struct RBRec { field: String, set: u32, binding: u32, kind: String, stages: Option<String>, span: proc_macro2::Span }
-
-    let items: Vec<RBRec> = collect::from_named_fields(st, |f| {
-        if let Some((kind, parsed)) = kind_set.parse(&f.attrs)? {
-            let field = f.ident.as_ref().unwrap().to_string();
-            let set = parsed.try_get_int("set")? as u32;
-            let binding = parsed.try_get_int("binding")? as u32;
-            let stages = parsed.get_str("stages").map(|s| s.to_string());
-            Ok(Some(RBRec { field, set, binding, kind, stages, span: f.span }))
-        } else {
-            Ok(None)
-        }
-    })?;
-
-    // Enforce uniqueness of (set, binding)
-    let items = collect::unique_by(items, |r| ((r.set, r.binding), r.span), "duplicate (set,binding)")?;
-
-    // Build static module + trait impls using CodeGen composition
-    let ty = quote! { macrokid_graphics::resources::BindingDesc };
-    let entry_tokens: Vec<proc_macro2::TokenStream> = items.iter().map(|r| {
-        let field = &r.field;
-        let set = r.set;
-        let binding = r.binding;
-        let kind = match r.kind.as_str() {
-            "uniform" => quote! { macrokid_graphics::resources::ResourceKind::Uniform },
-            "texture" => quote! { macrokid_graphics::resources::ResourceKind::Texture },
-            "sampler" => quote! { macrokid_graphics::resources::ResourceKind::Sampler },
-            _ => quote! { macrokid_graphics::resources::ResourceKind::CombinedImageSampler },
-        };
-        let stages = if let Some(s) = &r.stages {
-            let mut vs = false; let mut fs = false; let mut cs = false;
-            for part in s.split(|c| c == '|' || c == ',' || c == ' ') { match part.trim().to_lowercase().as_str() {
-                "vs" | "vert" | "vertex" => vs = true,
-                "fs" | "frag" | "fragment" => fs = true,
-                "cs" | "comp" | "compute" => cs = true,
-                "" => {},
-                other => {
-                    // Unknown tokens are ignored to keep derive tolerant; consider erroring in future
-                    let _ = other;
-                }
-            }}
-            let vs_b = vs; let fs_b = fs; let cs_b = cs;
-            quote! { Some(macrokid_graphics::resources::BindingStages { vs: #vs_b, fs: #fs_b, cs: #cs_b }) }
-        } else { quote! { None } };
-        quote! { macrokid_graphics::resources::BindingDesc { field: #field, set: #set, binding: #binding, kind: #kind, stages: #stages } }
-    }).collect();
-
-    struct RBInput { mod_ident: syn::Ident, ty: proc_macro2::TokenStream, entries: Vec<proc_macro2::TokenStream>, spec: TypeSpec }
-    let rb_input = RBInput {
-        mod_ident: syn::Ident::new("__mk_rb", Span::call_site()),
-        ty: ty.clone(),
-        entries: entry_tokens,
-        spec: spec.clone(),
-    };
-
-    struct RBModuleGen;
-    impl crate::gen::CodeGen<RBInput> for RBModuleGen {
-        type Output = proc_macro2::TokenStream;
-        fn generate(i: &RBInput) -> Self::Output {
-            let mod_ident = &i.mod_ident;
-            let ty = &i.ty;
-            let entries = &i.entries;
-            quote! {
-                #[allow(non_snake_case, non_upper_case_globals)]
-                mod #mod_ident { pub static DATA: &[#ty] = &[ #( #entries ),* ]; }
-            }
-        }
-    }
-
-    struct RBImplGen;
-    impl crate::gen::CodeGen<RBInput> for RBImplGen {
-        type Output = proc_macro2::TokenStream;
-        fn generate(i: &RBInput) -> Self::Output {
-            let method_ident = syn::Ident::new("bindings", Span::call_site());
-            let trait_impl = codegen::impl_trait_method_static_slice(
-                &i.spec,
-                quote! { macrokid_graphics::resources::ResourceBindings },
-                method_ident,
-                i.ty.clone(),
-                i.mod_ident.clone(),
-            );
-            let ty = &i.ty;
-            let mod_ident = &i.mod_ident;
-            let inherent = codegen::impl_inherent_methods(&i.spec, &[quote! {
-                pub fn describe_bindings() -> &'static [#ty] { #mod_ident::DATA }
-            }]);
-            quote! { #trait_impl #inherent }
-        }
-    }
-
-    type RBFull = crate::gen::Chain<RBModuleGen, RBImplGen>;
-    let ts = RBFull::generate(&rb_input);
-    Ok(ts)
+    ResourceBindingDerive::generate(&spec)
 }
 
 // ================= BufferLayout derive =================
 
 derive_entry!(BufferLayout, attrs = [vertex, buffer], handler = expand_buffer_layout);
+
+/// Vertex attribute record (collected from field attributes)
+#[derive(Clone, Debug)]
+struct VertexAttrRec {
+    field: String,
+    binding: u32,
+    location: u32,
+    format: Option<String>,
+    offset: u32,
+    size: u32,
+    span: proc_macro2::Span,
+}
+
+/// Helper: infer size from format string
+fn size_from_format(fmt: &str) -> Option<usize> {
+    match fmt {
+        "f32" | "u32" | "i32" => Some(4),
+        "vec2" => Some(8),
+        "vec3" => Some(12),
+        "vec4" => Some(16),
+        "rgba8_unorm" | "u8x4_norm" => Some(4),
+        "mat4" => Some(64),
+        _ => None,
+    }
+}
+
+/// Helper: infer size from syn::Type (supports paths and arrays)
+fn size_from_type(ty: &syn::Type) -> Option<usize> {
+    match ty {
+        syn::Type::Path(p) => p.path.segments.last().and_then(|seg| match seg.ident.to_string().as_str() {
+            "f32" | "u32" | "i32" => Some(4),
+            _ => None,
+        }),
+        syn::Type::Array(a) => {
+            let elem = &*a.elem;
+            let elem_size = size_from_type(elem)?;
+            if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(n), .. }) = &a.len {
+                let count = n.base10_parse::<usize>().ok()?;
+                Some(elem_size * count)
+            } else { None }
+        }
+        _ => None,
+    }
+}
+
+/// Collect vertex attribute records from fields
+fn collect_vertex_attrs(
+    st: &macrokid_core::ir::StructSpec,
+    vertex_schema: &macrokid_core::attr_schema::AttrSchema,
+) -> syn::Result<Vec<VertexAttrRec>> {
+    let mut recs: Vec<((u32, u32), VertexAttrRec)> = Vec::new();
+
+    match st.fields() {
+        FieldKind::Named(fields) | FieldKind::Unnamed(fields) => {
+            for f in fields {
+                // Only fields with #[vertex(..)] are included
+                if let Ok(v) = vertex_schema.parse(&f.attrs) {
+                    if v.map.is_empty() { continue; }
+
+                    let location = v.try_get_int("location")? as u32;
+                    let binding = v.get_int("binding").unwrap_or(0) as u32;
+                    let format_str = v.get_str("format").map(|s| s.to_string());
+                    let field_name = f.ident.as_ref()
+                        .map(|i| i.to_string())
+                        .unwrap_or_else(|| format!("_{}", f.index));
+
+                    // Determine size from format or type
+                    let size = if let Some(ref fmt) = format_str {
+                        size_from_format(fmt).ok_or_else(||
+                            syn::Error::new(f.span, format!("unknown format '{}' for field '{}'", fmt, field_name)))?
+                    } else {
+                        size_from_type(&f.ty).ok_or_else(||
+                            syn::Error::new(f.span, format!("cannot infer size for field '{}'", field_name)))?
+                    } as u32;
+
+                    recs.push(((binding, location), VertexAttrRec {
+                        field: field_name,
+                        binding,
+                        location,
+                        format: format_str,
+                        offset: 0, // Computed later
+                        size,
+                        span: f.span,
+                    }));
+                }
+            }
+        }
+        FieldKind::Unit => {}
+    }
+
+    // Sort and validate uniqueness of (binding, location)
+    recs.sort_by_key(|(key, _)| *key);
+    for w in recs.windows(2) {
+        if w[0].0 == w[1].0 {
+            return Err(syn::Error::new(
+                w[1].1.span,
+                format!("duplicate (binding, location) {:?}", w[1].0)
+            ));
+        }
+    }
+
+    Ok(recs.into_iter().map(|(_, rec)| rec).collect())
+}
+
+/// Compute offsets for attributes grouped by binding
+fn compute_offsets(attrs: &mut [VertexAttrRec]) {
+    use std::collections::BTreeMap;
+
+    // Group by binding
+    let mut by_binding: BTreeMap<u32, Vec<&mut VertexAttrRec>> = BTreeMap::new();
+    for attr in attrs.iter_mut() {
+        by_binding.entry(attr.binding).or_default().push(attr);
+    }
+
+    // Compute offsets per binding
+    for list in by_binding.values_mut() {
+        list.sort_by_key(|r| r.location);
+        let mut offset = 0u32;
+        for attr in list.iter_mut() {
+            attr.offset = offset;
+            offset = offset.saturating_add(attr.size);
+        }
+    }
+}
+
+/// Compute stride per binding (sum of sizes or override)
+fn compute_strides(
+    attrs: &[VertexAttrRec],
+    override_stride: Option<u32>,
+) -> std::collections::BTreeMap<u32, u32> {
+    use std::collections::BTreeMap;
+
+    let mut by_binding: BTreeMap<u32, u32> = BTreeMap::new();
+    for attr in attrs {
+        *by_binding.entry(attr.binding).or_insert(0) += attr.size;
+    }
+
+    if let Some(stride) = override_stride {
+        // Override applies to all bindings
+        for v in by_binding.values_mut() {
+            *v = stride;
+        }
+    }
+
+    by_binding
+}
 
 fn expand_buffer_layout(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let spec = TypeSpec::from_derive_input(input)?;
@@ -144,7 +312,7 @@ fn expand_buffer_layout(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
         _ => return Err(syn::Error::new(spec.span, "BufferLayout expects a struct")),
     };
 
-    // Schemas
+    // Define schemas
     let vertex_schema = macrokid_core::attr_schema::AttrSchema::new("vertex")
         .req_int("location")
         .opt_int("binding")
@@ -154,144 +322,78 @@ fn expand_buffer_layout(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
         .opt_int("stride")
         .opt_str("step");
 
-    // Parse type-level buffer attrs
-    let buf = macrokid_core::common::attr_schema::scope::on_type(&spec, &buffer_schema)?;
-    let step_mode = match buf.get_str("step").unwrap_or("vertex") {
+    // Parse type-level buffer configuration
+    let buf_attrs = macrokid_core::common::attr_schema::scope::on_type(&spec, &buffer_schema)?;
+    let step_mode = match buf_attrs.get_str("step").unwrap_or("vertex") {
         "vertex" => quote! { macrokid_graphics::resources::StepMode::Vertex },
         "instance" => quote! { macrokid_graphics::resources::StepMode::Instance },
-        other => return Err(syn::Error::new(spec.span, format!("unknown step mode '{}': expected 'vertex' or 'instance'", other))),
+        other => return Err(syn::Error::new(
+            spec.span,
+            format!("unknown step mode '{}': expected 'vertex' or 'instance'", other)
+        )),
     };
 
-    // Collect per-field vertex attributes where present
-    #[derive(Clone, Debug)]
-    struct VRec { field: String, binding: u32, location: u32, format: Option<String>, offset: u32, size: u32, span: proc_macro2::Span }
+    // Collect and process vertex attributes
+    let mut attrs = collect_vertex_attrs(st, &vertex_schema)?;
+    compute_offsets(&mut attrs);
+    let strides = compute_strides(&attrs, buf_attrs.get_int("stride").map(|v| v as u32));
 
-    // Helper: infer size from format string
-    fn size_from_format(fmt: &str) -> Option<usize> {
-        match fmt {
-            "f32" | "u32" | "i32" => Some(4),
-            "vec2" => Some(8),
-            "vec3" => Some(12),
-            "vec4" => Some(16),
-            "rgba8_unorm" | "u8x4_norm" => Some(4),
-            "mat4" => Some(64),
-            _ => None,
-        }
-    }
-
-    // Helper: infer size from syn::Type (supports paths and arrays)
-    fn size_from_type(ty: &syn::Type) -> Option<usize> {
-        match ty {
-            syn::Type::Path(p) => p.path.segments.last().and_then(|seg| match seg.ident.to_string().as_str() {
-                "f32" | "u32" | "i32" => Some(4),
-                _ => None,
-            }),
-            syn::Type::Array(a) => {
-                let elem = &*a.elem;
-                let elem_size = size_from_type(elem)?;
-                if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(n), .. }) = &a.len {
-                    let count = n.base10_parse::<usize>().ok()?;
-                    Some(elem_size * count)
-                } else { None }
-            }
-            _ => None,
-        }
-    }
-
-    // Build records
-    let mut recs_raw: Vec<((u32, u32), VRec)> = Vec::new();
-    match st.fields() {
-        FieldKind::Named(fields) | FieldKind::Unnamed(fields) => {
-            for f in fields {
-                // Only fields with #[vertex(..)] are included
-                if let Ok(v) = vertex_schema.parse(&f.attrs) {
-                    if v.map.is_empty() { continue; }
-                    let location = v.try_get_int("location")? as u32;
-                    let binding = v.get_int("binding").unwrap_or(0) as u32;
-                    let format_str = v.get_str("format").map(|s| s.to_string());
-                    let field_name = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_else(|| format!("_{}", f.index));
-
-                    // Determine size
-                    let size = if let Some(ref fmt) = format_str {
-                        size_from_format(fmt).ok_or_else(|| syn::Error::new(f.span, format!("unknown format '{}' for field '{}'", fmt, field_name)))?
-                    } else {
-                        size_from_type(&f.ty).ok_or_else(|| syn::Error::new(f.span, format!("cannot infer size for field '{}'", field_name)))?
-                    } as u32;
-
-                    recs_raw.push(((binding, location), VRec { field: field_name, binding, location, format: format_str, offset: 0, size, span: f.span }));
-                }
-            }
-        }
-        FieldKind::Unit => {}
-    }
-
-    // Sort by location and detect duplicates
-    recs_raw.sort_by_key(|(key, _)| *key);
-    for w in recs_raw.windows(2) {
-        if w[0].0 == w[1].0 {
-            let span = w[1].1.span;
-            return Err(syn::Error::new(span, format!("duplicate (binding, location) {:?}", w[1].0)));
-        }
-    }
-
-    // Compute offsets and final records
-    use std::collections::BTreeMap;
-    let mut by_binding: BTreeMap<u32, Vec<VRec>> = BTreeMap::new();
-    for (_, r) in recs_raw.into_iter() { by_binding.entry(r.binding).or_default().push(r); }
-    for list in by_binding.values_mut() {
-        list.sort_by_key(|r| r.location);
-        let mut acc = 0u32;
-        for r in list.iter_mut() { r.offset = acc; acc = acc.saturating_add(r.size); }
-    }
-    let mut recs: Vec<VRec> = by_binding.values().flat_map(|v| v.clone()).collect();
-
-    // Stride from buffer attr or sum of sizes
-    // Strides: compute per binding (sum sizes), allow override via type-level stride (applies to all bindings)
-    let override_stride = buf.get_int("stride").map(|v| v as u32);
-    let mut strides: BTreeMap<u32, u32> = BTreeMap::new();
-    for (b, list) in by_binding.iter() {
-        let total: u32 = list.iter().map(|r| r.size).sum();
-        strides.insert(*b, override_stride.unwrap_or(total));
-    }
-
-    // Emit static attrs
-    let ty_attr = quote! { macrokid_graphics::resources::VertexAttr };
-    let entries = recs.iter().map(|r| {
+    // Generate vertex attribute descriptors
+    let attr_ty = quote! { macrokid_graphics::resources::VertexAttr };
+    let attr_entries = attrs.iter().map(|r| {
         let field = &r.field;
         let binding = r.binding;
         let location = r.location;
-        let format_s = r.format.as_deref().unwrap_or("auto");
+        let format = r.format.as_deref().unwrap_or("auto");
         let offset = r.offset;
         let size = r.size;
-        quote! { macrokid_graphics::resources::VertexAttr { field: #field, binding: #binding, location: #location, format: #format_s, offset: #offset, size: #size } }
+        quote! {
+            macrokid_graphics::resources::VertexAttr {
+                field: #field,
+                binding: #binding,
+                location: #location,
+                format: #format,
+                offset: #offset,
+                size: #size
+            }
+        }
     });
-    let (mod_ident, module) = codegen::static_slice_mod("vl", ty_attr.clone(), entries);
+    let (attr_mod, attr_module) = codegen::static_slice_mod("vl", attr_ty.clone(), attr_entries);
 
-    // Trait impl for VertexLayout
-    // Trait impl: both required methods
-    // Emit buffer descriptors for each binding
-    let bufd_ty = quote! { macrokid_graphics::resources::VertexBufferDesc };
-    let bufd_entries = strides.iter().map(|(b, s)| {
-        quote! { macrokid_graphics::resources::VertexBufferDesc { binding: #b, stride: #s, step: #step_mode } }
+    // Generate buffer descriptors
+    let buf_ty = quote! { macrokid_graphics::resources::VertexBufferDesc };
+    let buf_entries = strides.iter().map(|(binding, stride)| {
+        quote! {
+            macrokid_graphics::resources::VertexBufferDesc {
+                binding: #binding,
+                stride: #stride,
+                step: #step_mode
+            }
+        }
     });
-    let (buf_mod_ident, buf_mod) = codegen::static_slice_mod("vb", bufd_ty.clone(), bufd_entries);
+    let (buf_mod, buf_module) = codegen::static_slice_mod("vb", buf_ty.clone(), buf_entries);
 
+    // Generate trait implementation
     let trait_impl = quote! {
         impl macrokid_graphics::resources::VertexLayout for #ident {
-            fn vertex_attrs() -> &'static [#ty_attr] { #mod_ident::DATA }
-            fn vertex_buffers() -> &'static [#bufd_ty] { #buf_mod_ident::DATA }
+            fn vertex_attrs() -> &'static [#attr_ty] { #attr_mod::DATA }
+            fn vertex_buffers() -> &'static [#buf_ty] { #buf_mod::DATA }
         }
     };
-    // Inherent methods for convenience
-    let inherent = codegen::impl_inherent_methods(&spec, &[quote! {
-        pub fn describe_vertex_layout() -> &'static [#ty_attr] { #mod_ident::DATA }
-    }, quote! {
-        pub fn describe_vertex_buffers() -> &'static [macrokid_graphics::resources::VertexBufferDesc] {
-            <Self as macrokid_graphics::resources::VertexLayout>::vertex_buffers()
-        }
-    }]);
 
-    Ok(quote! { #module #buf_mod #trait_impl #inherent })
+    // Generate inherent methods
+    let inherent = codegen::impl_inherent_methods(&spec, &[
+        quote! {
+            pub fn describe_vertex_layout() -> &'static [#attr_ty] { #attr_mod::DATA }
+        },
+        quote! {
+            pub fn describe_vertex_buffers() -> &'static [#buf_ty] {
+                <Self as macrokid_graphics::resources::VertexLayout>::vertex_buffers()
+            }
+        }
+    ]);
+
+    Ok(quote! { #attr_module #buf_module #trait_impl #inherent })
 }
 
 // ================= GraphicsPipeline derive =================
@@ -446,7 +548,7 @@ fn expand_graphics_pipeline(input: DeriveInput) -> syn::Result<proc_macro2::Toke
             color_entries.push(quote! { macrokid_graphics::pipeline::ColorTargetDesc { format: #fmt, blend: #blend_ts } });
         }
     }
-    let ct_entries_tokens: Option<Vec<proc_macro2::TokenStream>> = if color_entries.is_empty() { None } else { Some(color_entries.clone()) };
+    let _ct_entries_tokens: Option<Vec<proc_macro2::TokenStream>> = if color_entries.is_empty() { None } else { Some(color_entries.clone()) };
     // No external module; embed color target slice inside the pipeline module
 
     // Optional #[depth_target(format = "D32_SFLOAT")] attribute
@@ -593,6 +695,7 @@ fn expand_render_engine(input: DeriveInput) -> syn::Result<proc_macro2::TokenStr
                     app: #app_s,
                     window: macrokid_graphics::engine::WindowCfg { width: #width, height: #height, vsync: #vsync },
                     pipelines,
+                    compute_pipelines: ::std::vec::Vec::new(),
                     options: macrokid_graphics::engine::BackendOptions::default(),
                 }
             }
@@ -636,7 +739,7 @@ fn expand_render_pass(input: DeriveInput) -> syn::Result<proc_macro2::TokenStrea
         }
     }
     let ct_entries_tokens: Option<Vec<proc_macro2::TokenStream>> = if color_entries.is_empty() { None } else { Some(color_entries.clone()) };
-    let (ct_mod_ident_opt, ct_mod_tokens_opt) = if color_entries.is_empty() {
+    let (_ct_mod_ident_opt, _ct_mod_tokens_opt) = if color_entries.is_empty() {
         (None, None)
     } else {
         let ty = quote! { macrokid_graphics::pipeline::ColorTargetDesc };

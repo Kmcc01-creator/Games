@@ -8,6 +8,16 @@ Macrokid provides high-level abstractions and reusable components for common mac
 
 **Enable developers to write powerful Rust proc-macros using high-level abstractions instead of wrestling with syn/quote directly.**
 
+## 📖 Documentation Structure
+
+This project follows a structured documentation approach:
+- **Root README.md** (this file) - Project overview and quick start
+- **[docs/](docs/)** - Cross-cutting documentation (architecture, guides, reference, design)
+- **Sub-project READMEs** - Library-specific quick starts and links to detailed docs
+- **Sub-project docs/** - Library-specific detailed documentation
+- **[CHANGELOG.md](CHANGELOG.md)** - Project history and version changes
+- **[ARCHIVE/](ARCHIVE/)** - Historical session notes and development artifacts
+
 ## 📁 Project Structure
 
 ```
@@ -161,18 +171,58 @@ We’re actively exploring graphics-focused DSLs and cross-language tooling:
 - `macrokid_clang_exec`: Exec-based Clang integration to analyze/generate from C/C++ headers.
 - `examples/graphics_demo`: Shows derives in action and emits C/C++ IR when `CLANG_EXEC_DEMO=1`.
 
-## 🧵 Threaded Scheduling
+## 🧵 Threaded Scheduling & GPU Synchronization
 
-Macrokid now includes opt-in, derive-friendly job scheduling utilities:
+Macrokid now includes opt-in, derive-friendly job scheduling utilities with GPU synchronization support:
 
-- Runtime (feature-gated): `macrokid_core::threads` with `Scheduler`, `ThreadPool`, `join_all`, `JobRun`, `SpawnExt`, and `ResourceAccess`.
+### CPU Threading (`macrokid_core::threads`)
+
+- Runtime (feature-gated): `Scheduler`, `ThreadPool`, `join_all`, `JobRun`, `SpawnExt`, and `ResourceAccess`.
 - Derives crate: `macrokid_threads_derive` providing `#[derive(Job)]`, `#[derive(System)]`, and `#[derive(Schedule)]`.
 - Schedule features:
   - Stage dependencies via `#[stage(after = "...")]` and sugar `#[stage(before = "...")]` (comma-separated lists supported).
   - Conflict-aware batching within each stage using `ResourceAccess` (greedy grouping of non-conflicting systems).
   - Debugging: `topo_groups()` returns topological layers of stages.
 
-See `MACROKID_THREADS.md` for setup and examples, and `examples/threads_demo` for a runnable demo.
+### GPU Resource Tracking (`macrokid_graphics::resources`)
+
+**NEW**: `#[derive(System)]` now detects GPU resources and generates barrier hints:
+
+```rust
+use macrokid_graphics::resources::{GpuBuffer, GpuImage, GpuResourceAccess};
+use macrokid_threads_derive::System;
+
+#[derive(System)]
+#[reads(GpuBuffer<VertexData>)]
+#[writes(GpuImage<RenderTarget>)]
+struct RenderGeometry;
+
+// Automatically generates barrier hints
+println!("{}", RenderGeometry::barrier_requirements());
+```
+
+Features:
+- **Type-level inference**: `GpuBuffer<Vertex>` infers `VERTEX_INPUT` pipeline stage
+- **Automatic barrier hints**: Human-readable Vulkan synchronization requirements
+- **Thread-safe GPU resources**: `GpuImage` uses atomic layout tracking
+- **Mixed CPU/GPU resources**: Track both in same system
+
+### Multi-threaded Vulkan Recording (Experimental)
+
+**NEW**: Infrastructure for parallel command buffer recording:
+
+- **ThreadLocalPools**: Per-thread Vulkan command pools with secondary buffer allocation
+- **Thread-safe design**: Each worker thread gets isolated command pool
+- **Opt-in complexity**: Disabled by default, enable when needed
+- **Integration ready**: Foundation for `VkFrame`/`VkCommandEncoder` API
+
+**Status**: Core infrastructure complete (Track 1.1), high-level API in progress.
+
+See:
+- [Threading Guide](docs/MACROKID_THREADS.md) - CPU-side scheduling
+- [Multi-threaded Recording Design](docs/MULTITHREADED_RECORDING_DESIGN.md) - Vulkan parallel recording
+- [Barrier Generation Design](docs/BARRIER_CODEGEN_DESIGN.md) - GPU synchronization hints
+- [Usage Examples](docs/USAGE_EXAMPLES.md) - Practical examples
 
 Quick links and commands:
 - Graphics overview and Vulkan docs: see `MACROKID_GRAPHICS.md`.
@@ -368,12 +418,18 @@ work returned 999
 - Typed pattern DSL (feature-flagged)
 - Trace options (prefix/release/logger with optional `log` feature)
 - Working examples for all macro types and new helpers
+- **GPU resource type system** (GpuBuffer, GpuImage with thread-safe tracking)
+- **GPU barrier hint generation** (automatic Vulkan synchronization requirements)
+- **System derive GPU detection** (mixed CPU/GPU resource tracking)
+- **ThreadLocalPools infrastructure** (per-thread Vulkan command pools)
 
 ### 🔄 In Progress
 
 - Additional derive macro examples (using pattern DSL, advanced attributes)
 - Match validation helpers (extended heuristics)
 - CI and trybuild UI tests
+- **VkFrame and VkCommandEncoder** (high-level multi-threaded recording API)
+- **Schedule derive GPU barrier hints** (inter-stage synchronization analysis)
 
 ### 📋 Planned Features
 
@@ -382,6 +438,9 @@ work returned 999
 - IDE integration helpers
 - Comprehensive test suite / CI
 - Performance benchmarking
+- **Debug validation layer** for GPU barriers (runtime missing barrier detection)
+- **Automatic barrier emission** (opt-in Phase 3 of barrier generation)
+- **Transfer queue integration** (async GPU uploads with cross-queue sync)
 
 ## 💡 Contributing
 
@@ -393,14 +452,39 @@ The framework is designed to be extensible. Common contribution areas:
 4. **Documentation** - Improve onboarding and API docs
 5. **Performance** - Optimize compilation times and memory usage
 
-## 📚 Additional Resources
+## 📚 Documentation
 
+### Getting Started
+- **[Getting Started Guide](docs/guides/getting-started.md)** - Your first steps with Macrokid
+- **[Onboarding Guide](docs/guides/onboarding.md)** - Developer onboarding path
+- **[Code Generation Tutorial](docs/guides/codegen-tutorial.md)** - Complete tutorial on code generation
+- **[Quick Reference](docs/guides/codegen-quickref.md)** - Cheat sheets and common patterns
+
+### Architecture
+- **[Architecture Overview](docs/architecture/overview.md)** - System design and structure
+- **[IR Guide](docs/architecture/ir.md)** - Intermediate representation system
+- **[Combinators](docs/architecture/combinators.md)** - Combinator theory and implementation
+
+### Reference
+- **[API Reference](docs/reference/api.md)** - Complete API documentation
+- **[Match Arm Builder](docs/reference/match-arm-builder.md)** - Pattern matching utilities
+- **[Testing Guide](docs/reference/testing.md)** - Testing strategies
+
+### Design Documents
+- **[Framework Improvements](docs/design/framework-improvements.md)** - Design patterns and decisions
+- **[Parse Benchmark Analysis](docs/design/parse-benchmark.md)** - Performance analysis
+- **[Syn/Quote Analysis](docs/design/syn-quote-analysis.md)** - API integration notes
+
+### Sub-Project Documentation
+- **[macrokid_core](macrokid_core/README.md)** - Core framework abstractions
+- **[macrokid_graphics](macrokid_graphics/README.md)** - Graphics rendering system
+- **[macrokid_threads_derive](macrokid_threads_derive/README.md)** - Threading utilities
+
+### External Resources
 - [Rust Procedural Macros Book](https://doc.rust-lang.org/reference/procedural-macros.html)
 - [syn Crate Documentation](https://docs.rs/syn/latest/syn/)
 - [quote Crate Documentation](https://docs.rs/quote/latest/quote/)
 - [proc-macro2 Crate Documentation](https://docs.rs/proc-macro2/latest/proc_macro2/)
-- [MatchArmBuilder Guide](MATCH_ARM_BUILDER.md)
-- [IR Overview and Roadmap](IR.md)
 
 ---
 

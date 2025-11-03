@@ -88,13 +88,45 @@ pub fn derive_system(input: TokenStream) -> TokenStream {
         Ok(out)
     }
 
+    // Check if a type is a GPU resource (GpuBuffer<T> or GpuImage<T>)
+    fn is_gpu_type(ty: &syn::Type) -> bool {
+        if let syn::Type::Path(type_path) = ty {
+            if let Some(segment) = type_path.path.segments.last() {
+                let ident_str = segment.ident.to_string();
+                return ident_str == "GpuBuffer" || ident_str == "GpuImage";
+            }
+        }
+        false
+    }
+
     let reads = match types_from_attr(&di, "reads") { Ok(v) => v, Err(e) => return e.to_compile_error().into() };
     let writes = match types_from_attr(&di, "writes") { Ok(v) => v, Err(e) => return e.to_compile_error().into() };
 
-    // Build static arrays of TypeId::of::<T>()
-    let reads_ids: Vec<TokenStream2> = reads.iter().map(|t| quote! { ::std::any::TypeId::of::<#t>() }).collect();
-    let writes_ids: Vec<TokenStream2> = writes.iter().map(|t| quote! { ::std::any::TypeId::of::<#t>() }).collect();
-    let expanded = quote! {
+    // Separate CPU and GPU resources
+    let (cpu_reads, gpu_reads): (Vec<_>, Vec<_>) = reads.iter().partition(|t| !is_gpu_type(t));
+    let (cpu_writes, gpu_writes): (Vec<_>, Vec<_>) = writes.iter().partition(|t| !is_gpu_type(t));
+
+    // Build static arrays of TypeId::of::<T>() for CPU resources
+    let reads_ids: Vec<TokenStream2> = cpu_reads.iter().map(|t| quote! { ::std::any::TypeId::of::<#t>() }).collect();
+    let writes_ids: Vec<TokenStream2> = cpu_writes.iter().map(|t| quote! { ::std::any::TypeId::of::<#t>() }).collect();
+
+    // Generate GPU metadata for GPU resources
+    let gpu_reads_meta: Vec<TokenStream2> = gpu_reads.iter().map(|t| {
+        quote! {
+            <#t as macrokid_graphics::resources::GpuResource>::metadata()
+        }
+    }).collect();
+
+    let gpu_writes_meta: Vec<TokenStream2> = gpu_writes.iter().map(|t| {
+        quote! {
+            <#t as macrokid_graphics::resources::GpuResource>::metadata()
+        }
+    }).collect();
+
+    let has_gpu_resources = !gpu_reads.is_empty() || !gpu_writes.is_empty();
+
+    // Generate CPU ResourceAccess impl
+    let resource_access_impl = quote! {
         impl macrokid_core::threads::ResourceAccess for #ident {
             fn reads() -> &'static [::std::any::TypeId] {
                 static READS: ::std::sync::OnceLock<::std::vec::Vec<::std::any::TypeId>> = ::std::sync::OnceLock::new();
@@ -106,6 +138,31 @@ pub fn derive_system(input: TokenStream) -> TokenStream {
             }
         }
     };
+
+    // Generate GPU GpuResourceAccess impl if GPU resources are detected
+    let gpu_resource_access_impl = if has_gpu_resources {
+        quote! {
+            impl macrokid_graphics::resources::GpuResourceAccess for #ident {
+                fn gpu_reads() -> &'static [macrokid_graphics::resources::GpuResourceMeta] {
+                    static GPU_READS: ::std::sync::OnceLock<::std::vec::Vec<macrokid_graphics::resources::GpuResourceMeta>> = ::std::sync::OnceLock::new();
+                    GPU_READS.get_or_init(|| vec![ #( #gpu_reads_meta ),* ]).as_slice()
+                }
+
+                fn gpu_writes() -> &'static [macrokid_graphics::resources::GpuResourceMeta] {
+                    static GPU_WRITES: ::std::sync::OnceLock<::std::vec::Vec<macrokid_graphics::resources::GpuResourceMeta>> = ::std::sync::OnceLock::new();
+                    GPU_WRITES.get_or_init(|| vec![ #( #gpu_writes_meta ),* ]).as_slice()
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let expanded = quote! {
+        #resource_access_impl
+        #gpu_resource_access_impl
+    };
+
     expanded.into()
 }
 

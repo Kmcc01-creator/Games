@@ -160,7 +160,7 @@ pub fn get_nested_attr_value(attrs: &[Attribute], attr_name: &str, key: &str) ->
 
 /// Types accepted by `validate_attrs` for keys
 #[derive(Debug, Clone, Copy)]
-pub enum AttrType { Str, Bool, Int }
+pub enum AttrType { Str, Bool, Int, Float }
 
 /// Schema specification for a nested attribute key
 #[derive(Debug, Clone, Copy)]
@@ -176,6 +176,7 @@ pub enum AttrValue {
     Str(String),
     Bool(bool),
     Int(i64),
+    Float(f64),
 }
 
 /// Validate nested attributes like `#[name(key = "value", flag = true, count = 2)]` against a schema.
@@ -231,6 +232,11 @@ pub fn validate_attrs(
                 let v: syn::LitInt = meta.value()?.parse()?;
                 AttrValue::Int(v.base10_parse::<i64>()
                     .map_err(|_| syn::Error::new(v.span(), "expected integer"))?)
+            }
+            AttrType::Float => {
+                let v: syn::LitFloat = meta.value()?.parse()?;
+                AttrValue::Float(v.base10_parse::<f64>()
+                    .map_err(|_| syn::Error::new(v.span(), "expected float"))?)
             }
         };
 
